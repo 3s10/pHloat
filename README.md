@@ -125,7 +125,7 @@ PRB (BNC connector) -----> pH Probe (BNC)
 
 1. Power on the pH sensor while holding the BOOT button (GPIO 0)
 2. Connect to WiFi network: `pHloat-XXXXXXXX`
-3. Password: `phloat123`
+3. Password: check Serial Monitor — a random 16-character password is generated on first boot
 4. Open browser to `192.168.4.1`
 5. Enter:
    - Device name (e.g., "Fermenter-1")
@@ -136,7 +136,7 @@ PRB (BNC connector) -----> pH Probe (BNC)
 
 1. Power on relay
 2. Note the MAC address printed in Serial Monitor
-3. If WiFi not configured, connect to `pHloat-Relay` AP (password: `phloat123`)
+3. If WiFi not configured, connect to `pHloat-Relay` AP (password printed to Serial Monitor on first boot)
 4. Open browser to `192.168.4.1` (or relay's IP if WiFi configured)
 5. Go to Configuration page
 6. Enter:
@@ -148,7 +148,9 @@ PRB (BNC connector) -----> pH Probe (BNC)
 
 ## Google Sheets Integration
 
-You have **two options** for Google Sheets integration:
+The relay uses one upload path for **both** Google Apps Script and Tilt Pi. See `integration/UPLOAD_API.md` for the shared JSON contract.
+
+You have **two destination options** for remote upload:
 
 ### Option 1: Direct Upload (pHloat Relay → Google Sheets)
 
@@ -198,7 +200,11 @@ If you already have a Raspberry Pi running Tilt Pi, use it as a central hub!
    - Who has access: Anyone
 8. Click "Deploy"
 9. Copy the Web App URL
-10. Paste this URL into the pHloat Relay configuration
+10. In Apps Script: Project Settings → Script properties → add `PHLOAT_UPLOAD_SECRET` (generate a long random string)
+11. Paste the Web App URL into the pHloat Relay configuration
+12. Set the same upload token in the Relay **Upload Token** field (or leave blank to reuse the API key)
+
+All relay HTTPS uploads send `X-pHloat-Token` — requests without a matching token are rejected.
 
 ### Tilt Integration:
 

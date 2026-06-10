@@ -203,7 +203,7 @@ CREATE TABLE config (
 | `configured` | bool | `false` | Whether the device has been set up |
 | `deviceName` | string | `""` | Human-readable sensor label |
 | `relayMac` | string | `""` | Target relay MAC (colon-separated hex) |
-| `apPassword` | string | `"phloat123"` | Config-mode AP password (min 8 chars) |
+| `apPassword` | string | *(auto-generated)* | Config-mode AP password (min 12 chars) |
 | `pmk` | string | `""` | ESP-NOW PMK as 32 hex chars (16 bytes) |
 | `tempPin` | uint8 | `4` | OneWire GPIO pin for DS18B20 |
 | `readCount` | uint32 | `0` | Total readings taken (persistent across sleep) |
@@ -215,7 +215,7 @@ CREATE TABLE config (
 | `wifiSSID` | string | `""` | Client WiFi network |
 | `wifiPass` | string | `""` | Client WiFi password |
 | `sheetURL` | string | `""` | Google Apps Script HTTPS URL |
-| `apPassword` | string | `"phloat123"` | Fallback AP password |
+| `apPassword` | string | *(auto-generated)* | Fallback AP password |
 | `pmk` | string | `""` | ESP-NOW PMK (32 hex chars) |
 | `wifiEnabled` | bool | `false` | Whether to connect as STA |
 | `sheetsEnabled` | bool | `false` | Whether to POST to Google Sheets |
@@ -243,13 +243,13 @@ CREATE TABLE config (
 #define CONFIG_BUTTON     0        // GPIO 0 (BOOT) — hold LOW to enter config
 #define TEMP_PIN_DEFAULT  4        // Default OneWire data pin
 #define SLEEP_DURATION    60        // Seconds between readings
-#define DEFAULT_AP_PASSWORD "phloat123"
+#define DEFAULT_AP_PASSWORD ""  // generated on first boot
 ```
 
 ### Compile-Time Constants (Relay)
 
 ```cpp
-#define DEFAULT_AP_PASSWORD  "phloat123"
+#define DEFAULT_AP_PASSWORD  ""  // generated on first boot
 #define DEFAULT_PMK          ""
 #define MAX_SENSORS          10
 #define DATA_DIR             "/data"

@@ -26,6 +26,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ArduinoJson.h>
+#include "phloat_common.h"
+#include "web_ui_templates.h"
+#include "phloat_web.h"
 
 // ── Hardware pins ─────────────────────────────────────────────
 #define PH_SENSOR_ADDR   0x63
@@ -37,8 +40,8 @@
 // ── Timing ────────────────────────────────────────────────────
 #define SLEEP_DURATION    60  // seconds between readings
 
-// ── Default AP password (change before flashing) ──────────────
-#define DEFAULT_AP_PASSWORD  "phloat123"
+// ── Default AP password (generated on first boot if unset) ────
+#define DEFAULT_AP_PASSWORD  ""
 
 // ── Device configuration ──────────────────────────────────────
 struct Config {
@@ -57,14 +60,13 @@ WebServer server(80);
 OneWire* oneWire = nullptr;
 DallasTemperature* tempSensor = nullptr;
 
-// ── pH reading data structure for ESP-NOW ─────────────────────
-struct SensorData {
-  char deviceName[32];
-  float pH;
-  float temperature;
-  uint32_t readingNumber;
-  uint64_t timestamp;
-};
+volatile bool espNowAck = false;
+volatile bool espNowOk = false;
+
+void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
+  espNowAck = true;
+  espNowOk = (status == ESP_NOW_SEND_SUCCESS);
+}
 
 // ── Forward declarations ──────────────────────────────────────
 void enterConfigMode();
@@ -77,6 +79,7 @@ float readTemperature();
 bool initTempSensor();
 void sendDataViaESPNow(float ph, float temp);
 void goToSleep();
+void ensureSensorSecurityDefaults();
 
 // ═══════════════════════════════════════════════════════════════
 //  SETUP
@@ -99,9 +102,7 @@ void setup() {
   }
 
   // Fill defaults for unset optional fields
-  if (strlen(config.apPassword) == 0) {
-    strlcpy(config.apPassword, DEFAULT_AP_PASSWORD, sizeof(config.apPassword));
-  }
+  ensureSensorSecurityDefaults();
   if (config.tempPin == 0) {
     config.tempPin = TEMP_PIN_DEFAULT;
   }
@@ -131,12 +132,8 @@ void setup() {
   float ph = readPH();
   float temp = readTemperature();
 
-  // Apply temperature compensation to pH if we have a real reading
-  if (ph > 0 && ph < 14 && temp > -40 && temp < 125) {
-    // Nernst-based temperature compensation: pH varies ~0.03 per °C from 25°C
-    float calTemp = 25.0;
-    ph = ph + (calTemp - temp) * 0.03;
-  }
+  // Atlas pH OEM applies temperature compensation internally when temp is sent via I2C.
+  // Do not apply a second manual correction here.
 
   Serial.printf("pH: %.2f, Temp: %.2f°C\n", ph, temp);
 
@@ -185,103 +182,12 @@ void setupWebServer() {
 }
 
 void handleRoot() {
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pHloat Sensor Configuration</title>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto;
-           padding: 20px; background: #f5f5f5; }
-    .container { background: white; padding: 30px; border-radius: 10px;
-                 box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
-    label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
-    input, select { width: 100%; padding: 10px; margin-top: 5px;
-                    border: 1px solid #ddd; border-radius: 5px;
-                    box-sizing: border-box; font-size: 16px; }
-    button { width: 100%; padding: 12px; margin-top: 20px; background: #4CAF50;
-             color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }
-    button:hover { background: #45a049; }
-    .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin-top: 20px; }
-    .success { background: #4CAF50; color: white; padding: 15px; border-radius: 5px;
-               margin-top: 20px; display: none; }
-    .help { font-size: 0.85em; color: #888; font-weight: normal; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>pHloat Sensor Setup</h1>
-
-    <form id="configForm">
-      <label for="deviceName">Device Name:</label>
-      <input type="text" id="deviceName" name="deviceName" value=")rawliteral"
-      + String(config.deviceName) + R"rawliteral(" placeholder="e.g., Fermenter-1" required>
-
-      <label for="relayMac">Relay MAC Address:</label>
-      <input type="text" id="relayMac" name="relayMac" value=")rawliteral"
-      + String(config.relayMac) + R"rawliteral(" placeholder="AA:BB:CC:DD:EE:FF"
-             pattern="[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}" required>
-
-      <label for="apPassword">AP Password: <span class="help">(for config mode WiFi)</span></label>
-      <input type="text" id="apPassword" name="apPassword" value=")rawliteral"
-      + String(config.apPassword) + R"rawliteral(" minlength="8" required>
-
-      <label for="pmk">ESP-NOW Encryption Key (PMK): <span class="help">(16 bytes hex = 32 hex chars)</span></label>
-      <input type="text" id="pmk" name="pmk" value=")rawliteral"
-      + String(config.pmk) + R"rawliteral(" placeholder="32 hex characters for over-the-air encryption"
-             pattern="[0-9A-Fa-f]{32}" maxlength="32">
-
-      <label for="tempPin">Temperature Sensor GPIO Pin:</label>
-      <input type="number" id="tempPin" name="tempPin" value=")rawliteral"
-      + String(config.tempPin) + R"rawliteral(" min="0" max="39">
-
-      <button type="submit">Save Configuration</button>
-    </form>
-
-    <div class="success" id="successMsg">
-      Configuration saved! Device will reboot and start taking readings.
-    </div>
-
-    <div class="info">
-      <strong>Setup Instructions:</strong><br>
-      1. Give your sensor a unique name<br>
-      2. Enter your pHloat Relay's MAC address<br>
-      3. Set an AP password (min 8 chars, for config WiFi)<br>
-      4. Set the ESP-NOW PMK for encrypted data transmission<br>
-      5. Specify the GPIO pin for your DS18B20 temp probe<br>
-      6. Save and the device will reboot<br><br>
-      <strong>Note:</strong> Calibration is performed through the Relay interface.
-    </div>
-  </div>
-
-  <script>
-    document.getElementById('configForm').addEventListener('submit', function(e) {
-      e.preventDefault();
-      const formData = new FormData(this);
-      const data = {};
-      formData.forEach((value, key) => data[key] = value);
-      fetch('/save', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(data)
-      })
-      .then(response => response.json())
-      .then(result => {
-        if (result.success) {
-          document.getElementById('successMsg').style.display = 'block';
-          setTimeout(() => { location.href = '/'; }, 3000);
-        } else {
-          alert('Error: ' + (result.error || 'Unknown'));
-        }
-      });
-    });
-  </script>
-</body>
-</html>
-)rawliteral";
+  String html = phloat_load_template(TPL_CONFIG);
+  phloat_tpl_replace(html, "{{DEVICE_NAME}}", String(config.deviceName));
+  phloat_tpl_replace(html, "{{RELAY_MAC}}", String(config.relayMac));
+  phloat_tpl_replace(html, "{{AP_PASSWORD}}", String(config.apPassword));
+  phloat_tpl_replace(html, "{{PMK}}", String(config.pmk));
+  phloat_tpl_replace(html, "{{TEMP_PIN}}", String(config.tempPin));
   server.send(200, "text/html", html);
 }
 
@@ -314,8 +220,8 @@ void handleSave() {
     server.send(400, "application/json", "{\"success\":false,\"error\":\"Name and MAC required\"}");
     return;
   }
-  if (strlen(pw) < 8) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"Password must be 8+ chars\"}");
+  if (strlen(pw) < PHLOAT_MIN_AP_PASSWORD_LEN || phloat_is_weak_password(pw)) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Password must be 12+ chars and not the default\"}");
     return;
   }
   if (strlen(pmk) > 0 && strlen(pmk) != 32) {
@@ -323,8 +229,11 @@ void handleSave() {
     return;
   }
 
+  char safeName[32];
+  phloat_sanitize_device_name(name, safeName, sizeof(safeName));
+
   // Save to preferences
-  preferences.putString("deviceName", name);
+  preferences.putString("deviceName", safeName);
   preferences.putString("relayMac",    mac);
   preferences.putString("apPassword",  pw);
   preferences.putString("pmk",         pmk);
@@ -427,29 +336,18 @@ void sendDataViaESPNow(float ph, float temp) {
     return;
   }
 
-  // Set PMK for encryption (applies to all peers)
-  if (strlen(config.pmk) == 32) {
-    // Convert hex PMK to 16 raw bytes
-    uint8_t pmkBytes[16];
-    for (int i = 0; i < 16; i++) {
-      char hex[3] = { config.pmk[i*2], config.pmk[i*2+1], '\0' };
-      pmkBytes[i] = (uint8_t)strtol(hex, nullptr, 16);
-    }
-    esp_now_set_pmk(pmkBytes);
+  esp_now_register_send_cb(onEspNowSent);
+
+  if (strlen(config.pmk) == 32 && !phloat_apply_pmk(config.pmk)) {
+    Serial.println("Invalid ESP-NOW PMK");
   }
 
-  // Parse relay MAC address
   uint8_t relayMacBytes[6];
-  int parsed = sscanf(config.relayMac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-             &relayMacBytes[0], &relayMacBytes[1], &relayMacBytes[2],
-             &relayMacBytes[3], &relayMacBytes[4], &relayMacBytes[5]);
-
-  if (parsed != 6) {
+  if (!phloat_parse_mac(config.relayMac, relayMacBytes)) {
     Serial.println("Invalid relay MAC address");
     return;
   }
 
-  // Add peer with encryption enabled when PMK is set
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, relayMacBytes, 6);
   peerInfo.channel = 0;
@@ -460,23 +358,52 @@ void sendDataViaESPNow(float ph, float temp) {
     return;
   }
 
-  // Prepare and send data
   SensorData data;
-  strlcpy(data.deviceName, config.deviceName, sizeof(data.deviceName));
-  data.pH             = ph;
-  data.temperature     = temp;
-  data.readingNumber  = config.readingCount + 1;
-  data.timestamp      = millis();
+  phloat_init_sensor_data(data);
+  phloat_sanitize_device_name(config.deviceName, data.deviceName, sizeof(data.deviceName));
+  data.pH = ph;
+  data.temperature = temp;
+  data.readingNumber = config.readingCount + 1;
+  data.timestamp = 0;
+  WiFi.macAddress(data.senderMac);
 
-  esp_err_t result = esp_now_send(relayMacBytes, (uint8_t*)&data, sizeof(data));
+  bool sent = false;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    espNowAck = false;
+    espNowOk = false;
+    esp_err_t result = esp_now_send(relayMacBytes, (uint8_t*)&data, sizeof(data));
+    if (result != ESP_OK) {
+      Serial.printf("ESP-NOW send error: %d\n", result);
+      continue;
+    }
 
-  if (result == ESP_OK) {
-    Serial.println("Data sent via encrypted ESP-NOW");
-  } else {
-    Serial.printf("ESP-NOW send error: %d\n", result);
+    unsigned long start = millis();
+    while (!espNowAck && millis() - start < 500) {
+      delay(10);
+    }
+    if (espNowOk) {
+      sent = true;
+      Serial.println("Data sent via ESP-NOW");
+      break;
+    }
+    Serial.printf("ESP-NOW send attempt %d failed, retrying...\n", attempt + 1);
+    delay(50);
   }
 
-  // No deinit() or extra delay — deep sleep will clean up everything
+  if (!sent) {
+    Serial.println("ESP-NOW send failed after retries");
+  }
+}
+
+void ensureSensorSecurityDefaults() {
+  if (strlen(config.apPassword) == 0 || phloat_is_weak_password(config.apPassword)) {
+    char pass[17];
+    phloat_generate_hex_token(pass, sizeof(pass));
+    pass[16] = '\0';
+    strlcpy(config.apPassword, pass, sizeof(config.apPassword));
+    preferences.putString("apPassword", pass);
+    Serial.println("*** SECURITY: Generated AP password (save this): " + String(pass));
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

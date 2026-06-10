@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pH Sensor Calibration</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto;
+           padding: 20px; background: #f5f5f5; }
+    .container { background: white; padding: 30px; border-radius: 10px;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; }
+    .calibration-steps { background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .calibration-steps ol { margin-left: 20px; }
+    .calibration-steps li { margin: 10px 0; line-height: 1.6; }
+    label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
+    select, input { width: 100%; padding: 10px; margin-top: 5px;
+                    border: 1px solid #ddd; border-radius: 5px; font-size: 16px; }
+    .reading-group { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }
+    .reading-box { background: #f9f9f9; padding: 15px; border-radius: 8px; border: 2px solid #ddd; }
+    .reading-box label { margin-top: 0; color: #667eea; }
+    button { width: 100%; padding: 12px; margin-top: 20px; background: #667eea;
+             color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }
+    button:hover { background: #764ba2; }
+    .back-link { display: inline-block; margin-bottom: 20px; color: #667eea; text-decoration: none; }
+    .success { background: #4CAF50; color: white; padding: 15px; border-radius: 5px;
+               margin: 20px 0; display: none; }
+  </style>
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+  <div class="container">
+    <h1>🎯 pH Sensor Calibration</h1>
+
+    <div class="calibration-steps">
+      <strong>3-Point Calibration Procedure:</strong>
+      <ol>
+        <li>Select the sensor you want to calibrate</li>
+        <li>Place sensor in pH 7.0 buffer, wait for stable reading, note the value</li>
+        <li>Rinse, place in pH 4.0 buffer, wait for stable reading, note the value</li>
+        <li>Rinse, place in pH 10.0 buffer, wait for stable reading, note the value</li>
+        <li>Enter all three readings below and click "Save Calibration"</li>
+      </ol>
+    </div>
+
+    <div class="success" id="successMsg">Calibration saved!</div>
+
+    <form id="calibrationForm">
+      <label for="sensorSelect">Select Sensor:</label>
+      <select id="sensorSelect" name="sensor" required>
+        <option value="">-- Choose a sensor --</option>
+      </select>
+
+      <div class="reading-group">
+        <div class="reading-box">
+          <label for="ph4">pH 4.0 Buffer Reading:</label>
+          <input type="number" step="0.01" id="ph4" name="ph4"
+                 placeholder="e.g., 4.02" min="0" max="13" required>
+        </div>
+        <div class="reading-box">
+          <label for="ph7">pH 7.0 Buffer Reading:</label>
+          <input type="number" step="0.01" id="ph7" name="ph7"
+                 placeholder="e.g., 7.01" min="0" max="13" required>
+        </div>
+        <div class="reading-box">
+          <label for="ph10">pH 10.0 Buffer Reading:</label>
+          <input type="number" step="0.01" id="ph10" name="ph10"
+                 placeholder="e.g., 10.03" min="0" max="13" required>
+        </div>
+      </div>
+
+      <button type="submit">Save Calibration</button>
+    </form>
+  </div>
+
+  <script>
+    const sensors = {{SENSOR_LIST_JSON}};
+    const sel = document.getElementById('sensorSelect');
+    sensors.forEach(s => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      sel.appendChild(o);
+    });
+
+    const apiKey = sessionStorage.getItem('apiKey') || '';
+
+    document.getElementById('calibrationForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const headers = {'Content-Type': 'application/json'};
+      if (apiKey) headers['X-API-Key'] = apiKey;
+
+      fetch('/saveCalibration', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({
+          sensor: document.getElementById('sensorSelect').value,
+          ph4:    parseFloat(document.getElementById('ph4').value),
+          ph7:    parseFloat(document.getElementById('ph7').value),
+          ph10:   parseFloat(document.getElementById('ph10').value)
+        })
+      })
+      .then(r => r.json())
+      .then(result => {
+        if (result.success) {
+          document.getElementById('successMsg').style.display = 'block';
+          setTimeout(() => { document.getElementById('successMsg').style.display = 'none'; }, 3000);
+        } else {
+          alert('Error: ' + (result.error || 'Unknown'));
+        }
+      });
+    });
+  </script>
+</body>
+</html>

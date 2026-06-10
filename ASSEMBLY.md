@@ -265,7 +265,7 @@ If not using enclosure:
 
 1. **Connect to relay AP:**
    - WiFi network: `pHloat-Relay`
-   - Password: `phloat123`
+   - Password: check Serial Monitor (auto-generated on first boot)
 
 2. **Access web interface:**
    - Open browser to `192.168.4.1`

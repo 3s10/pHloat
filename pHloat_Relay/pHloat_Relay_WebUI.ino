@@ -1,10 +1,13 @@
 /*
  * pHloat_Relay_WebUI.ino
- * v3.2 — SPIFFS-safe file listing, masked secrets, configurable auth, OTA link
+ * v3.3 — HTML templates in web/relay/*.html (see scripts/embed_web_ui.py)
  *
  * Web interface handlers for pHloat Relay.
  * Include this file after pHloat_Relay.ino.
  */
+
+#include "web_ui_templates.h"
+#include "phloat_web.h"
 
 // ── Shared auth check for write endpoints ─────────────────────
 bool requireAuth() {
@@ -16,7 +19,10 @@ bool requireAuth() {
   String storedKey = preferences.getString("apiKey", "");
   preferences.end();
 
-  if (storedKey.length() == 0) return true;  // no key set = auth disabled
+  if (storedKey.length() == 0) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"API key not initialized\"}");
+    return false;
+  }
 
   String supplied = server.header("X-API-Key");
   if (supplied != storedKey) {
@@ -31,136 +37,7 @@ bool requireAuth() {
 // ═══════════════════════════════════════════════════════════════
 
 void handleRoot() {
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pHloat Relay Dashboard</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-           min-height: 100vh; padding: 20px; }
-    .container { max-width: 1200px; margin: 0 auto; }
-    .header { background: white; padding: 30px; border-radius: 15px;
-              box-shadow: 0 10px 30px rgba(0,0,0,0.2); margin-bottom: 30px;
-              text-align: center; }
-    .header h1 { color: #333; font-size: 2.5em; margin-bottom: 10px; }
-    .header .subtitle { color: #666; font-size: 1.1em; }
-    .mac-address { background: #f0f0f0; padding: 10px 20px; border-radius: 8px;
-                   display: inline-block; margin-top: 15px;
-                   font-family: monospace; font-weight: bold; color: #764ba2; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-             gap: 20px; margin-bottom: 30px; }
-    .card { background: white; padding: 25px; border-radius: 12px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1); transition: transform 0.2s;
-            cursor: pointer; }
-    .card:hover { transform: translateY(-5px); box-shadow: 0 10px 25px rgba(0,0,0,0.15); }
-    .card h2 { color: #667eea; margin-bottom: 15px; font-size: 1.5em; }
-    .card p { color: #666; line-height: 1.6; }
-    .card .icon { font-size: 3em; margin-bottom: 15px; }
-    .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px;
-                    font-size: 0.9em; font-weight: bold; margin-top: 10px; }
-    .status-online { background: #4CAF50; color: white; }
-    .status-offline { background: #f44336; color: white; }
-    .info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-top: 15px; }
-    .info-item { background: #f9f9f9; padding: 12px; border-radius: 8px; }
-    .info-label { font-size: 0.9em; color: #888; margin-bottom: 5px; }
-    .info-value { font-weight: bold; color: #333; font-size: 1.1em; }
-    .ota-badge { display: inline-block; background: #ff9800; color: white; padding: 3px 10px;
-                 border-radius: 10px; font-size: 0.75em; margin-left: 8px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>pHloat Relay Dashboard</h1>
-      <p class="subtitle">pH Monitoring & Data Management System</p>
-      <div class="mac-address" id="macAddress">Loading...</div>
-    </div>
-
-    <div class="cards">
-      <div class="card" onclick="location.href='/config'">
-        <div class="icon">⚙️</div>
-        <h2>Configuration</h2>
-        <p>WiFi, Google Sheets, encryption keys, and system settings</p>
-        <div id="wifiStatus" class="status-badge">Checking...</div>
-      </div>
-
-      <div class="card" onclick="location.href='/calibration'">
-        <div class="icon">🎯</div>
-        <h2>Calibration</h2>
-        <p>Calibrate pH sensors using 3-point calibration (pH 4, 7, 10)</p>
-        <div class="info-value" id="sensorCount">0 sensors calibrated</div>
-      </div>
-
-      <div class="card" onclick="location.href='/data'">
-        <div class="icon">📊</div>
-        <h2>Data Review</h2>
-        <p>View, download, and manage pH sensor data files</p>
-        <div class="info-value" id="dataFiles">Loading...</div>
-      </div>
-
-      <div class="card">
-        <div class="icon">💾</div>
-        <h2>Storage Status</h2>
-        <div class="info-grid">
-          <div class="info-item"><div class="info-label">Used</div>
-            <div class="info-value" id="storageUsed">...</div></div>
-          <div class="info-item"><div class="info-label">Free</div>
-            <div class="info-value" id="storageFree">...</div></div>
-          <div class="info-item"><div class="info-label">Total</div>
-            <div class="info-value" id="storageTotal">...</div></div>
-          <div class="info-item"><div class="info-label">Reserved</div>
-            <div class="info-value">512 KB</div></div>
-        </div>
-      </div>
-
-      <div class="card" onclick="location.href='/update'">
-        <div class="icon">🔄</div>
-        <h2>Firmware Update <span class="ota-badge">OTA</span></h2>
-        <p>Upload new firmware over-the-air. No USB cable needed.</p>
-        <div class="info-value">ElegantOTA</div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    function updateStatus() {
-      fetch('/status').then(r => r.json()).then(data => {
-        document.getElementById('macAddress').textContent = 'MAC: ' + data.mac;
-        const w = document.getElementById('wifiStatus');
-        w.textContent = data.wifiConnected ? 'WiFi Connected' : 'WiFi Offline';
-        w.className = 'status-badge ' + (data.wifiConnected ? 'status-online' : 'status-offline');
-      });
-
-      fetch('/storageInfo').then(r => r.json()).then(data => {
-        document.getElementById('storageUsed').textContent  = (data.used / 1024).toFixed(1) + ' KB';
-        document.getElementById('storageFree').textContent  = (data.free / 1024).toFixed(1) + ' KB';
-        document.getElementById('storageTotal').textContent = (data.total / 1024).toFixed(1) + ' KB';
-        document.getElementById('dataFiles').textContent    = data.fileCount + ' data files';
-        if (data.free < 524288) {
-          document.getElementById('storageFree').style.color = '#f44336';
-        }
-      });
-    }
-
-    // Read API key from URL param or prompt
-    if (!sessionStorage.getItem('apiKey')) {
-      const params = new URLSearchParams(window.location.search);
-      const k = params.get('key');
-      if (k) sessionStorage.setItem('apiKey', k);
-    }
-    updateStatus();
-    setInterval(updateStatus, 5000);
-  </script>
-</body>
-</html>
-)rawliteral";
-
-  server.send(200, "text/html", html);
+  server.send(200, "text/html", phloat_load_template(TPL_DASHBOARD));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -168,211 +45,67 @@ void handleRoot() {
 // ═══════════════════════════════════════════════════════════════
 
 void handleConfig() {
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pHloat Configuration</title>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 800px; margin: 20px auto;
-           padding: 20px; background: #f5f5f5; }
-    .container { background: white; padding: 30px; border-radius: 10px;
-                 box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    h1 { color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; margin-bottom: 30px; }
-    .section { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
-    .section:last-child { border-bottom: none; }
-    .section h2 { color: #667eea; margin-bottom: 15px; font-size: 1.3em; }
-    label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
-    input[type="text"], input[type="password"], input[type="number"], select {
-      width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd;
-      border-radius: 5px; box-sizing: border-box; font-size: 16px; }
-    .checkbox-group { margin-top: 15px; }
-    .checkbox-group label { display: inline-block; font-weight: normal; margin-left: 10px; }
-    .checkbox-group input[type="checkbox"] { width: auto; margin-right: 5px; }
-    button { width: 100%; padding: 12px; margin-top: 20px; background: #667eea;
-             color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }
-    button:hover { background: #764ba2; }
-    .back-link { display: inline-block; margin-bottom: 20px; color: #667eea; text-decoration: none; }
-    .success { background: #4CAF50; color: white; padding: 15px; border-radius: 5px;
-               margin-bottom: 20px; display: none; }
-    .help-text { font-size: 0.9em; color: #888; margin-top: 5px; font-weight: normal; }
-    .secret-note { background: #fff3cd; padding: 8px 12px; border-radius: 5px;
-                   font-size: 0.85em; color: #856404; margin-top: 5px; }
-  </style>
-</head>
-<body>
-  <a href="/" class="back-link">&larr; Back to Dashboard</a>
+  preferences.begin("relay-config", true);
+  String apiKey = preferences.getString("apiKey", "");
+  preferences.end();
 
-  <div class="container">
-    <h1>⚙️ System Configuration</h1>
-
-    <div class="success" id="successMsg">Configuration saved! Restarting...</div>
-
-    <!-- API Key gate -->
-    <div id="authGate" style="display:none;">
-      <div class="section">
-        <h2>Authentication Required</h2>
-        <p style="color:#666; margin-bottom:15px;">Enter the relay API key to access configuration.</p>
-        <label for="authKey">API Key:</label>
-        <input type="password" id="authKey" placeholder="Enter API key">
-        <button onclick="unlock()">Unlock</button>
-      </div>
-    </div>
-
-    <form id="configForm" style="display:none;">
-      <div class="section">
-        <h2>WiFi Settings</h2>
-        <div class="checkbox-group">
-          <input type="checkbox" id="wifiEnabled" name="wifiEnabled">
-          <label for="wifiEnabled">Enable WiFi Connection</label>
-        </div>
-        <label for="wifiSSID">WiFi Network Name (SSID):</label>
-        <input type="text" id="wifiSSID" name="wifiSSID" value=")rawliteral"
-        + String(relayConfig.wifiSSID) + R"rawliteral(">
-
-        <label for="wifiPassword">WiFi Password:</label>
-        <input type="password" id="wifiPassword" name="wifiPassword" placeholder="(leave blank to keep current)">
-        <div class="help-text">Fill in only to change the stored password</div>
-      </div>
-
-      <div class="section">
-        <h2>Time Settings</h2>
-        <label for="ntpServer">NTP Server:</label>
-        <input type="text" id="ntpServer" name="ntpServer" value=")rawliteral"
-        + String(relayConfig.ntpServer) + R"rawliteral(">
-
-        <label for="timezoneOffset">Timezone Offset (seconds):</label>
-        <input type="number" id="timezoneOffset" name="timezoneOffset" value=")rawliteral"
-        + String(relayConfig.timezoneOffset) + R"rawliteral(">
-        <div class="help-text">e.g., -18000 for EST, -14400 for EDT</div>
-      </div>
-
-      <div class="section">
-        <h2>Google Sheets Integration</h2>
-        <div class="checkbox-group">
-          <input type="checkbox" id="sheetsEnabled" name="sheetsEnabled">
-          <label for="sheetsEnabled">Enable Google Sheets Upload</label>
-        </div>
-        <label for="googleSheetURL">Google Apps Script Web App URL:</label>
-        <input type="text" id="googleSheetURL" name="googleSheetURL"
-               value=")rawliteral" + String(relayConfig.googleSheetURL) + R"rawliteral("
-               placeholder="https://script.google.com/macros/s/...">
-        <div class="help-text">Always use the HTTPS URL from your Apps Script deployment</div>
-      </div>
-
-      <div class="section">
-        <h2>Security</h2>
-        <label for="apPassword">AP Mode Password:</label>
-        <input type="text" id="apPassword" name="apPassword" value=")rawliteral"
-        + String(relayConfig.apPassword) + R"rawliteral(">
-        <div class="help-text">Password for the "pHloat-Relay" WiFi access point</div>
-
-        <label for="pmk">ESP-NOW PMK (Encryption Key):</label>
-        <input type="text" id="pmk" name="pmk" value=")rawliteral"
-        + String(relayConfig.pmk) + R"rawliteral("
-               placeholder="32 hex characters (must match sensor PMK)" maxlength="32">
-        <div class="help-text">Set the same 32-char hex key on ALL sensors and this relay</div>
-
-        <label for="apiKey">Web UI API Key:</label>
-        <input type="text" id="apiKey" name="apiKey" value=")
-        + String([&]() {
-            preferences.begin("relay-config", true);
-            String k = preferences.getString("apiKey", "");
-            preferences.end();
-            return k;
-          }())
-        + R"rawliteral(" placeholder="Leave blank for no auth">
-        <div class="help-text">Protects config/calibration endpoints. Required for POST requests.</div>
-      </div>
-
-      <button type="submit">Save Configuration</button>
-    </form>
-  </div>
-
-  <script>
-    let apiKey = sessionStorage.getItem('apiKey') || '';
-
-    function unlock() {
-      const k = document.getElementById('authKey').value;
-      // Test the key against /status (all endpoints accept valid header)
-      fetch('/status', { headers: {'X-API-Key': k} })
-        .then(r => { if (r.ok) return r.json(); throw new Error('auth'); })
-        .then(() => {
-          apiKey = k;
-          sessionStorage.setItem('apiKey', k);
-          document.getElementById('authGate').style.display = 'none';
-          document.getElementById('configForm').style.display = '';
-          loadConfig();
-        })
-        .catch(() => alert('Invalid API key'));
-      }
-
-    function maybeAuth(cb) {
-      // Check if auth is required by trying unauthenticated request
-      fetch('/status').then(r => r.json()).then(data => {
-        // Always load config — if auth is needed for saves, it'll be caught at submit
-        document.getElementById('configForm').style.display = '';
-        loadConfig();
-      });
-      // Skip auth gate for now — it triggers only on save failure
-      document.getElementById('configForm').style.display = '';
-      loadConfig();
-    }
-
-    function loadConfig() {
-      document.getElementById('wifiEnabled').checked = )rawliteral"
-      + String(relayConfig.wifiEnabled ? "true" : "false") + R"rawliteral(;
-      document.getElementById('sheetsEnabled').checked = )rawliteral"
-      + String(relayConfig.sheetsEnabled ? "true" : "false") + R"rawliteral(;
-    }
-
-    document.getElementById('configForm').addEventListener('submit', function(e) {
-      e.preventDefault();
-      const pw = document.getElementById('wifiPassword').value;
-
-      const formData = {
-        wifiEnabled:    document.getElementById('wifiEnabled').checked,
-        wifiSSID:       document.getElementById('wifiSSID').value,
-        ntpServer:      document.getElementById('ntpServer').value,
-        timezoneOffset: parseInt(document.getElementById('timezoneOffset').value),
-        sheetsEnabled:  document.getElementById('sheetsEnabled').checked,
-        googleSheetURL: document.getElementById('googleSheetURL').value,
-        apPassword:     document.getElementById('apPassword').value,
-        pmk:            document.getElementById('pmk').value,
-        apiKey:         document.getElementById('apiKey').value
-      };
-
-      // Only send password if changed
-      if (pw.length > 0) formData.wifiPassword = pw;
-
-      const headers = {'Content-Type': 'application/json'};
-      if (apiKey) headers['X-API-Key'] = apiKey;
-
-      fetch('/saveConfig', {
-        method: 'POST', headers: headers,
-        body: JSON.stringify(formData)
-      })
-      .then(r => r.json())
-      .then(result => {
-        if (result.success) {
-          document.getElementById('successMsg').style.display = 'block';
-          setTimeout(() => { location.href = '/'; }, 2000);
-        } else {
-          alert('Error: ' + (result.error || 'Unknown'));
-        }
-      })
-      .catch(err => alert('Network error: ' + err));
-    });
-
-    maybeAuth();
-  </script>
-</body>
-</html>
-)rawliteral";
-
+  String html = phloat_load_template(TPL_CONFIG);
+  phloat_tpl_replace(html, "{{WIFI_SSID}}", String(relayConfig.wifiSSID));
+  phloat_tpl_replace(html, "{{NTP_SERVER}}", String(relayConfig.ntpServer));
+  phloat_tpl_replace(html, "{{TIMEZONE_OFFSET}}", String(relayConfig.timezoneOffset));
+  phloat_tpl_replace(html, "{{UPLOAD_URL}}", String(relayConfig.googleSheetURL));
+  phloat_tpl_replace(html, "{{AP_PASSWORD}}", String(relayConfig.apPassword));
+  phloat_tpl_replace(html, "{{PMK}}", String(relayConfig.pmk));
+  phloat_tpl_replace(html, "{{API_KEY}}", apiKey);
+  phloat_tpl_replace(html, "{{UPLOAD_SECRET}}", String(relayConfig.uploadSecret));
+  phloat_tpl_replace(html, "{{WIFI_ENABLED}}", relayConfig.wifiEnabled ? "true" : "false");
+  phloat_tpl_replace(html, "{{SHEETS_ENABLED}}", relayConfig.sheetsEnabled ? "true" : "false");
   server.send(200, "text/html", html);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CALIBRATION PAGE (/calibration)
+// ═══════════════════════════════════════════════════════════════
+
+void handleCalibration() {
+  String sensorList = "[";
+  File root = SPIFFS.open("/");
+  bool first = true;
+
+  while (true) {
+    File f = root.openNextFile();
+    if (!f) break;
+
+    String name = String(f.name());
+    f.close();
+
+    if (!name.startsWith("/data/") || !name.endsWith(".csv")) continue;
+
+    int slash = name.lastIndexOf('/');
+    int under = name.indexOf('_', slash + 1);
+    if (under <= slash) continue;
+
+    String dev = name.substring(slash + 1, under);
+    if (sensorList.indexOf("\"" + dev + "\"") >= 0) continue;
+
+    if (!first) sensorList += ",";
+    sensorList += "\"" + dev + "\"";
+    first = false;
+  }
+  root.close();
+  sensorList += "]";
+
+  String html = phloat_load_template(TPL_CALIBRATION);
+  phloat_tpl_replace(html, "{{SENSOR_LIST_JSON}}", sensorList);
+  server.send(200, "text/html", html);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DATA PAGE (/data)
+// ═══════════════════════════════════════════════════════════════
+
+void handleData() {
+  server.send(200, "text/html", phloat_load_template(TPL_DATA));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -414,16 +147,25 @@ void handleSaveConfig() {
   strlcpy(relayConfig.googleSheetURL, doc["googleSheetURL"] | "", sizeof(relayConfig.googleSheetURL));
 
   // ── Security ──
-  const char* apPassword = doc["apPassword"] | DEFAULT_AP_PASSWORD;
-  if (strlen(apPassword) >= 8) {
+  const char* apPassword = doc["apPassword"] | "";
+  if (strlen(apPassword) >= PHLOAT_MIN_AP_PASSWORD_LEN && !phloat_is_weak_password(apPassword)) {
     strlcpy(relayConfig.apPassword, apPassword, sizeof(relayConfig.apPassword));
   }
   strlcpy(relayConfig.pmk, doc["pmk"] | "", sizeof(relayConfig.pmk));
 
-  // API key (stored separately for auth check)
   const char* apiKey = doc["apiKey"] | "";
+  const char* uploadSecret = doc["uploadSecret"] | "";
   preferences.begin("relay-config", false);
-  preferences.putString("apiKey", apiKey);
+  if (strlen(apiKey) > 0) {
+    preferences.putString("apiKey", apiKey);
+  }
+  if (strlen(uploadSecret) > 0) {
+    strlcpy(relayConfig.uploadSecret, uploadSecret, sizeof(relayConfig.uploadSecret));
+    preferences.putString("uploadSecret", uploadSecret);
+  } else if (strlen(apiKey) > 0) {
+    strlcpy(relayConfig.uploadSecret, apiKey, sizeof(relayConfig.uploadSecret));
+    preferences.putString("uploadSecret", apiKey);
+  }
   preferences.end();
 
   saveConfig();

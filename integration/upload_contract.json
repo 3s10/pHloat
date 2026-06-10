@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "description": "Shared pHloat remote upload contract used by relay firmware, Google Apps Script, and Tilt Pi server.",
+  "auth_header": "X-pHloat-Token",
+  "endpoints": {
+    "google_apps_script": {
+      "method": "POST",
+      "url_pattern": "https://script.google.com/macros/s/...",
+      "notes": "Deploy GoogleAppsScript.js as a web app (Execute as: Me, Anyone). Set PHLOAT_UPLOAD_SECRET in Script Properties."
+    },
+    "tilt_pi": {
+      "method": "POST",
+      "path": "/api/ph",
+      "url_example": "http://192.168.1.50:5000/api/ph",
+      "notes": "Set upload_secret in config.json or PHLOAT_UPLOAD_SECRET env var. HTTP allowed on local network."
+    }
+  },
+  "payload": {
+    "device": "string (sanitized device name)",
+    "pH": "number or decimal string 0-14",
+    "temperature": "number or string (optional)",
+    "timestamp": "ISO-8601 or YYYY-MM-DD HH:MM:SS",
+    "readingNumber": "integer"
+  },
+  "response": {
+    "status": "success | error",
+    "message": "string",
+    "tilt_matched": "boolean (Tilt Pi and GAS when Tilt data found)"
+  },
+  "time_match_window_seconds": 60
+}

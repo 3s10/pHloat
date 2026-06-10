@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pHloat Data Review</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1000px; margin: 20px auto;
+           padding: 20px; background: #f5f5f5; }
+    .container { background: white; padding: 30px; border-radius: 10px;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; }
+    .file-list { margin: 20px 0; }
+    .file-item { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 8px;
+                 display: flex; justify-content: space-between; align-items: center;
+                 border: 1px solid #ddd; }
+    .file-info { flex-grow: 1; }
+    .file-name { font-weight: bold; color: #333; font-size: 1.1em; }
+    .file-size { color: #888; font-size: 0.9em; margin-top: 5px; }
+    .file-actions { display: flex; gap: 10px; }
+    .btn { padding: 8px 20px; border: none; border-radius: 5px; cursor: pointer;
+           font-size: 14px; text-decoration: none; display: inline-block; }
+    .btn-download { background: #4CAF50; color: white; }
+    .btn-delete { background: #f44336; color: white; }
+    .btn:hover { opacity: 0.8; }
+    .back-link { display: inline-block; margin-bottom: 20px; color: #667eea; text-decoration: none; }
+    .storage-warning { background: #fff3cd; border: 2px solid #ffc107;
+                       padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+    .storage-critical { background: #f8d7da; border: 2px solid #f44336; }
+  </style>
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+  <div class="container">
+    <h1>📊 Data Review & Management</h1>
+
+    <div id="storageWarning" style="display:none;">
+      <p><strong>⚠️ Storage Alert:</strong> <span id="warningText"></span></p>
+    </div>
+
+    <div class="file-list" id="fileList"><p>Loading files...</p></div>
+  </div>
+
+  <script>
+    const apiKey = sessionStorage.getItem('apiKey') || '';
+
+    function loadFiles() {
+      fetch('/storageInfo').then(r => r.json()).then(data => {
+        const warn = document.getElementById('storageWarning');
+        const warnText = document.getElementById('warningText');
+
+        if (data.free < 524288) {
+          warn.style.display = 'block';
+          if (data.free < 102400) {
+            warn.className = 'storage-critical';
+            warnText.textContent = 'Critical! Only ' + (data.free / 1024).toFixed(1)
+                                 + ' KB free. Delete old data immediately.';
+          } else {
+            warn.className = 'storage-warning';
+            warnText.textContent = 'Low storage: ' + (data.free / 1024).toFixed(1)
+                                 + ' KB free. Consider deleting old files.';
+          }
+        }
+
+        if (data.files && data.files.length > 0) {
+          let h = '';
+          data.files.forEach(f => {
+            h += '<div class="file-item"><div class="file-info">'
+               + '<div class="file-name">' + f.name + '</div>'
+               + '<div class="file-size">' + (f.size / 1024).toFixed(2) + ' KB</div>'
+               + '</div><div class="file-actions">'
+               + '<a href="/download?file=' + encodeURIComponent(f.path)
+               + '" class="btn btn-download">Download</a>'
+               + '<button onclick="del(\'' + f.path + '\')" class="btn btn-delete">Delete</button>'
+               + '</div></div>';
+          });
+          document.getElementById('fileList').innerHTML = h;
+        } else {
+          document.getElementById('fileList').innerHTML = '<p>No data files found.</p>';
+        }
+      });
+    }
+
+    function del(path) {
+      if (!confirm('Delete this file?')) return;
+
+      const headers = {'Content-Type': 'application/json'};
+      if (apiKey) headers['X-API-Key'] = apiKey;
+
+      fetch('/deleteData', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({file: path})
+      })
+      .then(r => r.json())
+      .then(result => {
+        if (result.success) loadFiles(); else alert('Delete failed');
+      });
+    }
+
+    loadFiles();
+  </script>
+</body>
+</html>

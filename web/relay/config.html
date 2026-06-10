@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pHloat Configuration</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 20px auto;
+           padding: 20px; background: #f5f5f5; }
+    .container { background: white; padding: 30px; border-radius: 10px;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; margin-bottom: 30px; }
+    .section { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
+    .section:last-child { border-bottom: none; }
+    .section h2 { color: #667eea; margin-bottom: 15px; font-size: 1.3em; }
+    label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
+    input[type="text"], input[type="password"], input[type="number"], select {
+      width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd;
+      border-radius: 5px; box-sizing: border-box; font-size: 16px; }
+    .checkbox-group { margin-top: 15px; }
+    .checkbox-group label { display: inline-block; font-weight: normal; margin-left: 10px; }
+    .checkbox-group input[type="checkbox"] { width: auto; margin-right: 5px; }
+    button { width: 100%; padding: 12px; margin-top: 20px; background: #667eea;
+             color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }
+    button:hover { background: #764ba2; }
+    .back-link { display: inline-block; margin-bottom: 20px; color: #667eea; text-decoration: none; }
+    .success { background: #4CAF50; color: white; padding: 15px; border-radius: 5px;
+               margin-bottom: 20px; display: none; }
+    .help-text { font-size: 0.9em; color: #888; margin-top: 5px; font-weight: normal; }
+    .secret-note { background: #fff3cd; padding: 8px 12px; border-radius: 5px;
+                   font-size: 0.85em; color: #856404; margin-top: 5px; }
+  </style>
+</head>
+<body>
+  <a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+  <div class="container">
+    <h1>⚙️ System Configuration</h1>
+
+    <div class="success" id="successMsg">Configuration saved! Restarting...</div>
+
+    <!-- API Key gate -->
+    <div id="authGate" style="display:none;">
+      <div class="section">
+        <h2>Authentication Required</h2>
+        <p style="color:#666; margin-bottom:15px;">Enter the relay API key to access configuration.</p>
+        <label for="authKey">API Key:</label>
+        <input type="password" id="authKey" placeholder="Enter API key">
+        <button onclick="unlock()">Unlock</button>
+      </div>
+    </div>
+
+    <form id="configForm" style="display:none;">
+      <div class="section">
+        <h2>WiFi Settings</h2>
+        <div class="checkbox-group">
+          <input type="checkbox" id="wifiEnabled" name="wifiEnabled">
+          <label for="wifiEnabled">Enable WiFi Connection</label>
+        </div>
+        <label for="wifiSSID">WiFi Network Name (SSID):</label>
+        <input type="text" id="wifiSSID" name="wifiSSID" value="{{WIFI_SSID}}">
+
+        <label for="wifiPassword">WiFi Password:</label>
+        <input type="password" id="wifiPassword" name="wifiPassword" placeholder="(leave blank to keep current)">
+        <div class="help-text">Fill in only to change the stored password</div>
+      </div>
+
+      <div class="section">
+        <h2>Time Settings</h2>
+        <label for="ntpServer">NTP Server:</label>
+        <input type="text" id="ntpServer" name="ntpServer" value="{{NTP_SERVER}}">
+
+        <label for="timezoneOffset">Timezone Offset (seconds):</label>
+        <input type="number" id="timezoneOffset" name="timezoneOffset" value="{{TIMEZONE_OFFSET}}">
+        <div class="help-text">e.g., -18000 for EST, -14400 for EDT</div>
+      </div>
+
+      <div class="section">
+        <h2>Remote Upload</h2>
+        <div class="checkbox-group">
+          <input type="checkbox" id="sheetsEnabled" name="sheetsEnabled">
+          <label for="sheetsEnabled">Enable remote upload</label>
+        </div>
+        <label for="googleSheetURL">Upload URL:</label>
+        <input type="text" id="googleSheetURL" name="googleSheetURL"
+               value="{{UPLOAD_URL}}"
+               placeholder="https://script.google.com/... or http://192.168.1.50:5000/api/ph">
+        <div class="help-text">Google Apps Script web app or Tilt Pi <code>/api/ph</code>. Same JSON body and <code>X-pHloat-Token</code> header.</div>
+      </div>
+
+      <div class="section">
+        <h2>Security</h2>
+        <label for="apPassword">AP Mode Password:</label>
+        <input type="text" id="apPassword" name="apPassword" value="{{AP_PASSWORD}}" minlength="12">
+        <div class="help-text">Min 12 chars. Auto-generated on first boot — check Serial Monitor.</div>
+
+        <label for="pmk">ESP-NOW PMK (Encryption Key):</label>
+        <input type="text" id="pmk" name="pmk" value="{{PMK}}"
+               placeholder="32 hex characters (must match sensor PMK)" maxlength="32">
+        <div class="help-text">Set the same 32-char hex key on ALL sensors and this relay</div>
+
+        <label for="apiKey">Web UI API Key:</label>
+        <input type="text" id="apiKey" name="apiKey" value="{{API_KEY}}" placeholder="Auto-generated on first boot">
+        <div class="help-text">Required for config/calibration saves. Printed to Serial Monitor on first boot.</div>
+
+        <label for="uploadSecret">Upload Token (Google Sheets / Tilt Pi):</label>
+        <input type="text" id="uploadSecret" name="uploadSecret" value="{{UPLOAD_SECRET}}" placeholder="Same value as PHLOAT_UPLOAD_SECRET">
+        <div class="help-text">Sent as X-pHloat-Token on HTTPS uploads. Defaults to the API key if blank.</div>
+      </div>
+
+      <button type="submit">Save Configuration</button>
+    </form>
+  </div>
+
+  <script>
+    let apiKey = sessionStorage.getItem('apiKey') || '';
+
+    function unlock() {
+      const k = document.getElementById('authKey').value;
+      // Test the key against /status (all endpoints accept valid header)
+      fetch('/status', { headers: {'X-API-Key': k} })
+        .then(r => { if (r.ok) return r.json(); throw new Error('auth'); })
+        .then(() => {
+          apiKey = k;
+          sessionStorage.setItem('apiKey', k);
+          document.getElementById('authGate').style.display = 'none';
+          document.getElementById('configForm').style.display = '';
+          loadConfig();
+        })
+        .catch(() => alert('Invalid API key'));
+      }
+
+    function maybeAuth(cb) {
+      // Check if auth is required by trying unauthenticated request
+      fetch('/status').then(r => r.json()).then(data => {
+        // Always load config — if auth is needed for saves, it'll be caught at submit
+        document.getElementById('configForm').style.display = '';
+        loadConfig();
+      });
+      // Skip auth gate for now — it triggers only on save failure
+      document.getElementById('configForm').style.display = '';
+      loadConfig();
+    }
+
+    function loadConfig() {
+      document.getElementById('wifiEnabled').checked = {{WIFI_ENABLED}};
+      document.getElementById('sheetsEnabled').checked = {{SHEETS_ENABLED}};
+    }
+
+    document.getElementById('configForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const pw = document.getElementById('wifiPassword').value;
+
+      const formData = {
+        wifiEnabled:    document.getElementById('wifiEnabled').checked,
+        wifiSSID:       document.getElementById('wifiSSID').value,
+        ntpServer:      document.getElementById('ntpServer').value,
+        timezoneOffset: parseInt(document.getElementById('timezoneOffset').value),
+        sheetsEnabled:  document.getElementById('sheetsEnabled').checked,
+        googleSheetURL: document.getElementById('googleSheetURL').value,
+        apPassword:     document.getElementById('apPassword').value,
+        pmk:            document.getElementById('pmk').value,
+        apiKey:         document.getElementById('apiKey').value,
+        uploadSecret:   document.getElementById('uploadSecret').value
+      };
+
+      // Only send password if changed
+      if (pw.length > 0) formData.wifiPassword = pw;
+
+      const headers = {'Content-Type': 'application/json'};
+      if (apiKey) headers['X-API-Key'] = apiKey;
+
+      fetch('/saveConfig', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify(formData)
+      })
+      .then(r => r.json())
+      .then(result => {
+        if (result.success) {
+          document.getElementById('successMsg').style.display = 'block';
+          setTimeout(() => { location.href = '/'; }, 2000);
+        } else {
+          alert('Error: ' + (result.error || 'Unknown'));
+        }
+      })
+      .catch(err => alert('Network error: ' + err));
+    });
+
+    maybeAuth();
+  </script>
+</body>
+</html>

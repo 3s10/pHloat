@@ -23,9 +23,10 @@
 #include <time.h>
 #include <ArduinoJson.h>
 #include <ElegantOTA.h>
+#include "phloat_common.h"
 
 // ── Defaults ──────────────────────────────────────────────────
-#define DEFAULT_AP_PASSWORD  "phloat123"
+#define DEFAULT_AP_PASSWORD  ""  // generated on first boot if unset
 #define DEFAULT_PMK          ""  // 32 hex chars for ESP-NOW encryption
 
 // ── Web server ─────────────────────────────────────────────────
@@ -39,6 +40,7 @@ struct RelayConfig {
   char googleSheetURL[256];
   char apPassword[32];
   char pmk[32];           // ESP-NOW PMK (16 bytes → 32 hex chars)
+  char uploadSecret[33];  // shared with Google Apps Script / Tilt Pi
   bool wifiEnabled;
   bool sheetsEnabled;
   char ntpServer[64];
@@ -46,15 +48,6 @@ struct RelayConfig {
 };
 
 RelayConfig relayConfig;
-
-// ── Sensor data structure (matches sensor firmware) ────────────
-struct SensorData {
-  char deviceName[32];
-  float pH;
-  float temperature;
-  uint32_t readingNumber;
-  uint64_t timestamp;
-};
 
 // ── Calibration data ───────────────────────────────────────────
 struct CalibrationData {
@@ -89,7 +82,7 @@ void initESPNow();
 void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int data_len);
 void setupWebServer();
 void saveDataToFile(const SensorData &data);
-void uploadToGoogleSheets(const SensorData &data);
+void uploadReadingRemote(const SensorData &data);
 void handleRoot();
 void handleConfig();
 void handleSaveConfig();
@@ -108,6 +101,7 @@ void initTime();
 time_t getCurrentTime();
 String getFormattedTime(time_t t);
 float calibratePH(const char* deviceName, float rawPH);
+void ensureSecurityDefaults();
 
 // ═══════════════════════════════════════════════════════════════
 //  SETUP
@@ -124,6 +118,7 @@ void setup() {
   Serial.println("SPIFFS initialized");
 
   loadConfig();
+  ensureSecurityDefaults();
   loadCalibrations();
 
   // Print MAC for sensor pairing
@@ -139,8 +134,8 @@ void setup() {
   initESPNow();
   setupWebServer();
 
-  // ElegantOTA provides /update endpoint for over-the-air firmware updates
-  ElegantOTA.begin(&server);
+  // OTA updates require the same AP password used for config mode
+  ElegantOTA.begin(&server, "phloat", relayConfig.apPassword);
 
   server.begin();
   Serial.println("Web server started on port 80");
@@ -237,15 +232,12 @@ void initESPNow() {
     return;
   }
 
-  // Set PMK for encryption if configured (32 hex chars = 16 bytes)
   if (strlen(relayConfig.pmk) == 32) {
-    uint8_t pmkBytes[16];
-    for (int i = 0; i < 16; i++) {
-      char hex[3] = { relayConfig.pmk[i*2], relayConfig.pmk[i*2+1], '\0' };
-      pmkBytes[i] = (uint8_t)strtol(hex, nullptr, 16);
+    if (phloat_apply_pmk(relayConfig.pmk)) {
+      Serial.println("ESP-NOW PMK set (encryption enabled)");
+    } else {
+      Serial.println("ESP-NOW PMK invalid — running without encryption");
     }
-    esp_now_set_pmk(pmkBytes);
-    Serial.println("ESP-NOW PMK set (encryption enabled)");
   } else {
     Serial.println("ESP-NOW running without encryption (PMK not set)");
   }
@@ -255,22 +247,28 @@ void initESPNow() {
 }
 
 void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-  if (data_len != sizeof(SensorData)) {
-    Serial.printf("Invalid data size: %d (expected %d)\n", data_len, sizeof(SensorData));
+  if (!phloat_valid_sensor_packet(data, data_len)) {
+    Serial.printf("Invalid ESP-NOW packet (size=%d, expected %d)\n", data_len, (int)sizeof(SensorData));
+    return;
+  }
+
+  if (!phloat_mac_allowed(preferences, mac_addr, true)) {
     return;
   }
 
   SensorData receivedData;
   memcpy(&receivedData, data, sizeof(SensorData));
+  phloat_sanitize_device_name(receivedData.deviceName, receivedData.deviceName, sizeof(receivedData.deviceName));
 
-  // Replace device timestamp with actual NTP time
-  receivedData.timestamp = getCurrentTime();
+  time_t relayTime = getCurrentTime();
+  if (relayTime > 0) {
+    receivedData.timestamp = (uint64_t)relayTime;
+  }
 
   Serial.printf("\n--- Data Received from %s ---\n", receivedData.deviceName);
   Serial.printf("Raw pH: %.2f, Temp: %.2f°C, Reading #%lu\n",
                 receivedData.pH, receivedData.temperature, receivedData.readingNumber);
 
-  // Apply calibration
   float calibratedPH = calibratePH(receivedData.deviceName, receivedData.pH);
   receivedData.pH = calibratedPH;
   Serial.printf("Calibrated pH: %.2f\n", calibratedPH);
@@ -278,7 +276,7 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int data_len) 
   saveDataToFile(receivedData);
 
   if (relayConfig.wifiEnabled && relayConfig.sheetsEnabled) {
-    uploadToGoogleSheets(receivedData);
+    uploadReadingRemote(receivedData);
   }
 
   Serial.println("---------------------------\n");
@@ -314,7 +312,9 @@ float calibratePH(const char* deviceName, float rawPH) {
 // ═══════════════════════════════════════════════════════════════
 
 void saveDataToFile(const SensorData &data) {
-  String filename = String(DATA_DIR) + "/" + data.deviceName + "_";
+  char safeName[32];
+  phloat_sanitize_device_name(data.deviceName, safeName, sizeof(safeName));
+  String filename = String(DATA_DIR) + "/" + safeName + "_";
 
   if (timeInitialized) {
     struct tm *timeinfo = localtime((time_t*)&data.timestamp);
@@ -344,7 +344,7 @@ void saveDataToFile(const SensorData &data) {
   } else {
     line += String(data.timestamp);
   }
-  line += "," + String(data.deviceName) + ","
+  line += "," + String(safeName) + ","
        + String(data.pH, 2) + "," + String(data.temperature, 1) + ","
        + String(data.readingNumber);
 
@@ -355,26 +355,10 @@ void saveDataToFile(const SensorData &data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  GOOGLE SHEETS UPLOAD (HTTPS)
+//  REMOTE UPLOAD (Google Apps Script or Tilt Pi /api/ph)
 // ═══════════════════════════════════════════════════════════════
 
-void uploadToGoogleSheets(const SensorData &data) {
-  if (!relayConfig.sheetsEnabled || strlen(relayConfig.googleSheetURL) == 0) return;
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected, skipping upload");
-    return;
-  }
-
-  // Enforce HTTPS
-  String url = relayConfig.googleSheetURL;
-  if (url.startsWith("http://")) {
-    url.replace("http://", "https://");
-  }
-
-  HTTPClient http;
-  http.begin(url);
-
+String buildUploadPayload(const SensorData &data) {
   StaticJsonDocument<512> doc;
   doc["device"]        = data.deviceName;
   doc["pH"]            = String(data.pH, 2);
@@ -384,9 +368,37 @@ void uploadToGoogleSheets(const SensorData &data) {
 
   String jsonData;
   serializeJson(doc, jsonData);
+  return jsonData;
+}
 
-  Serial.println("Uploading to Google Sheets...");
+void uploadReadingRemote(const SensorData &data) {
+  if (!relayConfig.sheetsEnabled || strlen(relayConfig.googleSheetURL) == 0) return;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected, skipping upload");
+    return;
+  }
+
+  String url = relayConfig.googleSheetURL;
+  phloat_normalize_upload_url(url);
+
+  HTTPClient http;
+  http.begin(url);
+
+  String jsonData = buildUploadPayload(data);
+
+  if (phloat_is_tiltpi_upload_url(url.c_str())) {
+    Serial.println("Uploading to Tilt Pi /api/ph...");
+  } else if (phloat_is_gas_upload_url(url.c_str())) {
+    Serial.println("Uploading to Google Apps Script...");
+  } else {
+    Serial.println("Uploading to remote endpoint...");
+  }
+
   http.addHeader("Content-Type", "application/json");
+  if (strlen(relayConfig.uploadSecret) > 0) {
+    http.addHeader(PHLOAT_UPLOAD_HEADER, relayConfig.uploadSecret);
+  }
 
   int code = http.POST(jsonData);
 
@@ -411,6 +423,7 @@ void loadConfig() {
   preferences.getString("sheetURL",   relayConfig.googleSheetURL, sizeof(relayConfig.googleSheetURL));
   preferences.getString("apPassword", relayConfig.apPassword,    sizeof(relayConfig.apPassword));
   preferences.getString("pmk",        relayConfig.pmk,           sizeof(relayConfig.pmk));
+  preferences.getString("uploadSecret", relayConfig.uploadSecret, sizeof(relayConfig.uploadSecret));
 
   relayConfig.wifiEnabled   = preferences.getBool("wifiEnabled",   false);
   relayConfig.sheetsEnabled = preferences.getBool("sheetsEnabled", false);
@@ -423,12 +436,38 @@ void loadConfig() {
 
   preferences.end();
 
-  // Fill defaults for optional fields
-  if (strlen(relayConfig.apPassword) == 0) {
-    strlcpy(relayConfig.apPassword, DEFAULT_AP_PASSWORD, sizeof(relayConfig.apPassword));
+  Serial.println("Configuration loaded");
+}
+
+void ensureSecurityDefaults() {
+  preferences.begin("relay-config", false);
+
+  String apiKey = preferences.getString("apiKey", "");
+  if (apiKey.length() == 0) {
+    char key[33];
+    phloat_generate_hex_token(key, sizeof(key));
+    apiKey = key;
+    preferences.putString("apiKey", apiKey);
+    Serial.println("*** SECURITY: Generated API key (save this): " + apiKey);
   }
 
-  Serial.println("Configuration loaded");
+  String uploadSecret = preferences.getString("uploadSecret", "");
+  if (uploadSecret.length() == 0) {
+    uploadSecret = apiKey;
+    preferences.putString("uploadSecret", uploadSecret);
+  }
+  strlcpy(relayConfig.uploadSecret, uploadSecret.c_str(), sizeof(relayConfig.uploadSecret));
+
+  if (strlen(relayConfig.apPassword) == 0 || phloat_is_weak_password(relayConfig.apPassword)) {
+    char pass[17];
+    phloat_generate_hex_token(pass, sizeof(pass));
+    pass[16] = '\0';
+    preferences.putString("apPassword", pass);
+    strlcpy(relayConfig.apPassword, pass, sizeof(relayConfig.apPassword));
+    Serial.println("*** SECURITY: Generated AP password (save this): " + String(pass));
+  }
+
+  preferences.end();
 }
 
 void saveConfig() {
@@ -439,6 +478,7 @@ void saveConfig() {
   preferences.putString("sheetURL",   relayConfig.googleSheetURL);
   preferences.putString("apPassword", relayConfig.apPassword);
   preferences.putString("pmk",        relayConfig.pmk);
+  preferences.putString("uploadSecret", relayConfig.uploadSecret);
   preferences.putBool("wifiEnabled",   relayConfig.wifiEnabled);
   preferences.putBool("sheetsEnabled", relayConfig.sheetsEnabled);
   preferences.putString("ntpServer",  relayConfig.ntpServer);

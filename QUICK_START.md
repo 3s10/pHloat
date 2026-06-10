@@ -20,14 +20,14 @@ Relay: Just plug in USB power
 
 ### Step 3: Configure Relay (3 min)
 1. Power on relay, note MAC address from serial monitor
-2. Connect to WiFi AP: `pHloat-Relay` (password: `phloat123`)
+2. Connect to WiFi AP: `pHloat-Relay` (password printed to Serial Monitor on first boot)
 3. Open browser to `192.168.4.1`
 4. Enter your WiFi credentials
 5. Save and reboot
 
 ### Step 4: Configure Sensor (2 min)
 1. Hold BOOT button while powering on sensor
-2. Connect to WiFi AP: `pHloat-XXXXXXXX` (password: `phloat123`)
+2. Connect to WiFi AP: `pHloat-XXXXXXXX` (password printed to Serial Monitor on first boot)
 3. Open browser to `192.168.4.1`
 4. Enter device name and relay MAC address
 5. Save and reboot
