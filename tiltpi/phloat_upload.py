@@ -1,5 +1,6 @@
 """Shared upload contract helpers for Tilt Pi server."""
 
+import hmac
 import json
 import os
 from datetime import datetime
@@ -23,9 +24,27 @@ def verify_upload_token(supplied: str, config: dict) -> tuple[bool, str | None]:
     expected = get_upload_secret(config)
     if not expected:
         return False, "Upload secret not configured"
-    if supplied != expected:
+    # Constant-time compare so response timing can't be used to recover the token.
+    if not hmac.compare_digest(str(supplied or ""), str(expected)):
         return False, "Unauthorized"
     return True, None
+
+
+def normalize_timestamp(value) -> str:
+    """Validate/normalize an incoming timestamp to ISO-8601.
+
+    Missing (None/"") -> now(). A present but unparseable value raises
+    ValueError (the Google Apps Script path already rejects these; the Tilt Pi
+    path used to store them verbatim and silently break Tilt matching).
+    """
+    if value in (None, ""):
+        return datetime.now().isoformat()
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("Invalid timestamp")
+    return dt.isoformat()
 
 
 def validate_reading_payload(data: dict) -> tuple[str, float, float | None, str, int | None]:
@@ -40,7 +59,7 @@ def validate_reading_payload(data: dict) -> tuple[str, float, float | None, str,
     temperature_raw = data.get("temperature")
     temperature = float(temperature_raw) if temperature_raw not in (None, "") else None
 
-    timestamp = data.get("timestamp") or datetime.now().isoformat()
+    timestamp = normalize_timestamp(data.get("timestamp"))
     reading_number = data.get("readingNumber")
     reading_number = int(reading_number) if reading_number not in (None, "") else None
 

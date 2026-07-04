@@ -12,7 +12,11 @@
  * 4. Deploy as Web App (Execute as: Me, Who has access: Anyone)
  * 5. Paste deployment URL into relay "Google Sheets URL"
  *
- * Requests must include header: X-pHloat-Token: <PHLOAT_UPLOAD_SECRET>
+ * Auth: Apps Script web apps cannot read request headers, so the token is
+ * carried in the request BODY (POST: {"token": "<secret>", ...}) or as a
+ * query PARAMETER (GET: ?token=<secret>). The relay sends it in the body
+ * automatically. (The Tilt Pi server, which can read headers, still uses the
+ * X-pHloat-Token header.)
  */
 
 const TIME_MATCH_WINDOW = 60; // seconds
@@ -21,14 +25,27 @@ function getUploadSecret_() {
   return PropertiesService.getScriptProperties().getProperty('PHLOAT_UPLOAD_SECRET') || '';
 }
 
-function verifyUploadToken_(e) {
+// Constant-time string comparison (avoids leaking the secret via timing).
+function constantTimeEquals_(a, b) {
+  a = String(a || '');
+  b = String(b || '');
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// Apps Script web apps do NOT expose request headers to doPost/doGet, so the
+// token cannot be read from an X-pHloat-Token header. The caller passes the
+// token taken from the request BODY (POST) or query PARAMETER (GET).
+function verifyUploadToken_(supplied) {
   const expected = getUploadSecret_();
   if (!expected) {
     throw new Error('PHLOAT_UPLOAD_SECRET is not set in Script Properties');
   }
-  const headers = (e && e.headers) || {};
-  const supplied = headers['X-pHloat-Token'] || headers['x-phloat-token'] || '';
-  if (supplied !== expected) {
+  if (!constantTimeEquals_(supplied, expected)) {
     throw new Error('Unauthorized');
   }
 }
@@ -40,8 +57,8 @@ function sanitizeDeviceName_(name) {
 
 function doPost(e) {
   try {
-    verifyUploadToken_(e);
     const data = JSON.parse(e.postData.contents);
+    verifyUploadToken_(data.token);   // token travels in the JSON body
 
     const deviceName = sanitizeDeviceName_(data.device);
     const pH = parseFloat(data.pH);
@@ -187,9 +204,9 @@ function testDoPost() {
     throw new Error('Set PHLOAT_UPLOAD_SECRET in Script Properties before running testDoPost');
   }
   const testData = {
-    headers: { 'X-pHloat-Token': secret },
     postData: {
       contents: JSON.stringify({
+        token: secret,            // token in the body — GAS cannot read headers
         device: 'Test-Fermenter',
         pH: 4.52,
         temperature: 18.5,
@@ -204,7 +221,7 @@ function testDoPost() {
 
 function doGet(e) {
   try {
-    verifyUploadToken_(e);
+    verifyUploadToken_(e.parameter.token);   // token travels as a query parameter
     const color = e.parameter.color;
     const gravity = parseFloat(e.parameter.gravity);
     const temp = parseFloat(e.parameter.temp);

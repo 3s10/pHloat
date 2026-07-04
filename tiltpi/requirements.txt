@@ -1,2 +1,8 @@
-flask>=2.3
-requests>=2.31
+# Core server (required)
+flask>=3.0,<4.0
+
+# Google Sheets upload (optional — only imported when google_sheets_enabled=true).
+# oauth2client is deprecated; prefer google-auth if you rework upload_to_google_sheets.
+# gspread 6.x is the line whose update(range_name=, values=) signature this code uses.
+# gspread>=6.0,<7.0
+# google-auth>=2.0

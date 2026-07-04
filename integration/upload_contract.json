@@ -1,21 +1,29 @@
 {
-  "version": 1,
+  "version": 2,
   "description": "Shared pHloat remote upload contract used by relay firmware, Google Apps Script, and Tilt Pi server.",
   "auth_header": "X-pHloat-Token",
+  "auth": {
+    "note": "The shared upload secret authenticates every request. Because Google Apps Script web apps cannot read request headers, the token is delivered per-endpoint as described below. Comparisons are constant-time.",
+    "tilt_pi": "X-pHloat-Token request header",
+    "google_apps_script": "token field in the JSON body (POST) or ?token= query parameter (GET)"
+  },
   "endpoints": {
     "google_apps_script": {
       "method": "POST",
       "url_pattern": "https://script.google.com/macros/s/...",
-      "notes": "Deploy GoogleAppsScript.js as a web app (Execute as: Me, Anyone). Set PHLOAT_UPLOAD_SECRET in Script Properties."
+      "auth": "body field \"token\"",
+      "notes": "Deploy GoogleAppsScript.js as a web app (Execute as: Me, Anyone). Set PHLOAT_UPLOAD_SECRET in Script Properties. The relay includes \"token\" in the JSON body automatically."
     },
     "tilt_pi": {
       "method": "POST",
       "path": "/api/ph",
       "url_example": "http://192.168.1.50:5000/api/ph",
-      "notes": "Set upload_secret in config.json or PHLOAT_UPLOAD_SECRET env var. HTTP allowed on local network."
+      "auth": "X-pHloat-Token header",
+      "notes": "Set upload_secret in config.json or PHLOAT_UPLOAD_SECRET env var. HTTP allowed on local network. Ignores the body \"token\" field."
     }
   },
   "payload": {
+    "token": "string (shared upload secret; consumed by Google Apps Script, ignored by Tilt Pi which uses the header)",
     "device": "string (sanitized device name)",
     "pH": "number or decimal string 0-14",
     "temperature": "number or string (optional)",

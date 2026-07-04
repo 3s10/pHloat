@@ -8,14 +8,14 @@ Uploads combined data to Google Sheets
 Provides local web interface for monitoring
 """
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
+import html
 import json
 import sqlite3
 import os
 from datetime import datetime, timedelta
 import threading
 import time
-import requests
 
 # Try to import Google Sheets libraries (optional)
 try:
@@ -80,6 +80,13 @@ def load_config():
         'tilt_db_path': TILT_DB_PATH,
         'auto_match_tilt': True,
         'port': 5000,
+        # Bind address. Default 0.0.0.0 so the relay can POST from the LAN.
+        # Read endpoints (/data, /api/recent, /api/status) are UNAUTHENTICATED
+        # and expose pH history + redacted config to anyone who can reach this
+        # host — treat the network as the trust boundary, or set bind_host to a
+        # specific interface / front it with a firewall. Only /api/ph (writes)
+        # requires the upload token.
+        'bind_host': '0.0.0.0',
         'upload_secret': os.environ.get('PHLOAT_UPLOAD_SECRET', ''),
     }
     
@@ -102,10 +109,20 @@ config = load_config()
 # Token bucket: 30 requests/minute per IP, burst of 10
 _rate_buckets = {}
 _rate_lock = threading.Lock()
+_rate_last_sweep = 0.0
+_RATE_SWEEP_INTERVAL = 300.0   # evict idle IPs every 5 minutes
+_RATE_IDLE_TTL = 120.0         # drop a bucket unseen for 2 minutes
 
 def check_rate_limit(client_ip):
+    global _rate_last_sweep
     now = time.time()
     with _rate_lock:
+        # Bound memory: periodically drop buckets for IPs that went idle, so a
+        # scan across many source IPs can't grow the dict without limit.
+        if now - _rate_last_sweep > _RATE_SWEEP_INTERVAL:
+            for ip in [ip for ip, b in _rate_buckets.items() if now - b["last"] > _RATE_IDLE_TTL]:
+                del _rate_buckets[ip]
+            _rate_last_sweep = now
         bucket = _rate_buckets.get(client_ip, {"tokens": 30, "last": now})
         elapsed = now - bucket["last"]
         bucket["tokens"] = min(30, bucket["tokens"] + elapsed * (30.0 / 60.0))
@@ -162,9 +179,10 @@ def upload_to_google_sheets(data_id):
             worksheet = spreadsheet.worksheet(device_name)
         except:
             worksheet = spreadsheet.add_worksheet(title=device_name, rows=1000, cols=10)
-            # Add headers
-            worksheet.update('A1:H1', [[
-                'Timestamp', 'pH', 'pH Temp (°C)', 'Tilt Color', 
+            # Add headers. Keyword args so this works on gspread 5.12+ and 6.x
+            # (positional update(range, values) was removed in gspread 6).
+            worksheet.update(range_name='A1:H1', values=[[
+                'Timestamp', 'pH', 'pH Temp (°C)', 'Tilt Color',
                 'Specific Gravity', 'Tilt Temp (°F)', 'Reading #', 'Match Status'
             ]])
         
@@ -336,7 +354,10 @@ def index():
 </body>
 </html>
     '''
-    return render_template_string(html)
+    # Static HTML (no user input in the template) — return directly rather than
+    # running it through the Jinja renderer, which would treat any stray {{ }}
+    # as a template expression (SSTI surface).
+    return html
 
 @app.route('/api/ph', methods=['POST'])
 def receive_ph_data():
@@ -403,12 +424,14 @@ def receive_ph_data():
             'tilt_color': tilt_match['color'] if tilt_match else None
         }), 200
         
+    except (ValueError, TypeError) as e:
+        # Bad client input — log detail server-side, return a generic 400 so we
+        # don't echo internal exception text back to the caller.
+        print(f"Invalid pH payload: {e}")
+        return jsonify({'status': 'error', 'message': 'Invalid payload'}), 400
     except Exception as e:
         print(f"Error receiving pH data: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        return jsonify({'status': 'error', 'message': 'Internal error'}), 500
 
 @app.route('/api/status')
 def api_status():
@@ -457,23 +480,28 @@ def view_data():
     rows = c.fetchall()
     conn.close()
     
-    # Simple HTML table view
-    html = '<html><head><title>pHloat Data</title></head><body>'
-    html += '<h1>pHloat pH Data</h1><a href="/">Back to Dashboard</a><br><br>'
-    html += '<table border="1"><tr>'
-    html += '<th>Device</th><th>pH</th><th>Temp</th><th>Timestamp</th>'
-    html += '<th>Tilt Color</th><th>SG</th></tr>'
-    
+    # Simple HTML table view. Escape every DB-derived string: device_name is
+    # sanitized on ingest, but matched_tilt_color/timestamp come from the Tilt
+    # DB and must not be able to inject markup (stored XSS).
+    def esc(v):
+        return html.escape(str(v)) if v is not None else "N/A"
+
+    html_out = '<html><head><title>pHloat Data</title></head><body>'
+    html_out += '<h1>pHloat pH Data</h1><a href="/">Back to Dashboard</a><br><br>'
+    html_out += '<table border="1"><tr>'
+    html_out += '<th>Device</th><th>pH</th><th>Temp</th><th>Timestamp</th>'
+    html_out += '<th>Tilt Color</th><th>SG</th></tr>'
+
     for row in rows:
-        html += f'<tr><td>{row["device_name"]}</td>'
-        html += f'<td>{row["pH"]:.2f}</td>'
-        html += f'<td>{row["temperature"] if row["temperature"] else "N/A"}</td>'
-        html += f'<td>{row["timestamp"]}</td>'
-        html += f'<td>{row["matched_tilt_color"] if row["matched_tilt_color"] else "N/A"}</td>'
-        html += f'<td>{row["matched_tilt_sg"] if row["matched_tilt_sg"] else "N/A"}</td></tr>'
-    
-    html += '</table></body></html>'
-    return html
+        html_out += f'<tr><td>{esc(row["device_name"])}</td>'
+        html_out += f'<td>{row["pH"]:.2f}</td>'
+        html_out += f'<td>{esc(row["temperature"]) if row["temperature"] else "N/A"}</td>'
+        html_out += f'<td>{esc(row["timestamp"])}</td>'
+        html_out += f'<td>{esc(row["matched_tilt_color"]) if row["matched_tilt_color"] else "N/A"}</td>'
+        html_out += f'<td>{esc(row["matched_tilt_sg"]) if row["matched_tilt_sg"] else "N/A"}</td></tr>'
+
+    html_out += '</table></body></html>'
+    return html_out
 
 @app.route('/config')
 def view_config():
@@ -499,4 +527,4 @@ if __name__ == '__main__':
     #   pip install waitress
     #   from waitress import serve
     #   serve(app, host='0.0.0.0', port=port)
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host=config.get('bind_host', '0.0.0.0'), port=port, debug=False)

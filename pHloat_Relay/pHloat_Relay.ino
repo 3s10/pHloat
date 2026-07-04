@@ -365,6 +365,12 @@ String buildUploadPayload(const SensorData &data) {
   doc["temperature"]   = String(data.temperature, 1);
   doc["timestamp"]     = timeInitialized ? getFormattedTime(data.timestamp) : String(data.timestamp);
   doc["readingNumber"] = data.readingNumber;
+  // Google Apps Script web apps cannot read request headers, so the auth token
+  // must travel in the body. Tilt Pi ignores this field and authenticates via
+  // the X-pHloat-Token header (still sent below).
+  if (strlen(relayConfig.uploadSecret) > 0) {
+    doc["token"] = relayConfig.uploadSecret;
+  }
 
   String jsonData;
   serializeJson(doc, jsonData);
@@ -402,8 +408,12 @@ void uploadReadingRemote(const SensorData &data) {
 
   int code = http.POST(jsonData);
 
-  if (code > 0) {
-    Serial.printf("Upload OK: %d — %s\n", code, http.getString().c_str());
+  // Only 2xx is success. A 401/403/500 has code > 0 but the upload was rejected
+  // (e.g. bad token) — surface that instead of logging "OK".
+  if (code >= 200 && code < 300) {
+    Serial.printf("Upload OK: %d\n", code);
+  } else if (code > 0) {
+    Serial.printf("Upload rejected: HTTP %d — %s\n", code, http.getString().c_str());
   } else {
     Serial.printf("Upload failed: %s\n", http.errorToString(code).c_str());
   }
@@ -566,6 +576,12 @@ void setupWebServer() {
   server.on("/deleteData",     HTTP_POST, handleDeleteData);
   server.on("/status",         handleStatus);
   server.on("/storageInfo",    handleStorageInfo);
+
+  // ESP32 WebServer only exposes headers registered here; without this,
+  // server.hasHeader("X-API-Key") is always false and requireAuth() rejects
+  // every authenticated request. Must run before server.begin().
+  const char *collectedHeaders[] = { "X-API-Key" };
+  server.collectHeaders(collectedHeaders, 1);
 }
 
 // ── Web UI handlers are in pHloat_Relay_WebUI.ino ──────────────

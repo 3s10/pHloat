@@ -91,21 +91,21 @@
       <div class="section">
         <h2>Security</h2>
         <label for="apPassword">AP Mode Password:</label>
-        <input type="text" id="apPassword" name="apPassword" value="{{AP_PASSWORD}}" minlength="12">
-        <div class="help-text">Min 12 chars. Auto-generated on first boot — check Serial Monitor.</div>
+        <input type="password" id="apPassword" name="apPassword" value="" minlength="12" placeholder="{{AP_PASSWORD_SET}}">
+        <div class="help-text">Min 12 chars. Auto-generated on first boot — check Serial Monitor. Leave blank to keep the current password.</div>
 
         <label for="pmk">ESP-NOW PMK (Encryption Key):</label>
-        <input type="text" id="pmk" name="pmk" value="{{PMK}}"
-               placeholder="32 hex characters (must match sensor PMK)" maxlength="32">
-        <div class="help-text">Set the same 32-char hex key on ALL sensors and this relay</div>
+        <input type="password" id="pmk" name="pmk" value=""
+               placeholder="{{PMK_SET}}" maxlength="32">
+        <div class="help-text">32-char hex key; set the same value on ALL sensors and this relay. Leave blank to keep the current key.</div>
 
         <label for="apiKey">Web UI API Key:</label>
-        <input type="text" id="apiKey" name="apiKey" value="{{API_KEY}}" placeholder="Auto-generated on first boot">
-        <div class="help-text">Required for config/calibration saves. Printed to Serial Monitor on first boot.</div>
+        <input type="password" id="apiKey" name="apiKey" value="" placeholder="{{API_KEY_SET}}">
+        <div class="help-text">Required for config/calibration saves. Printed to Serial Monitor on first boot. Leave blank to keep the current key.</div>
 
         <label for="uploadSecret">Upload Token (Google Sheets / Tilt Pi):</label>
-        <input type="text" id="uploadSecret" name="uploadSecret" value="{{UPLOAD_SECRET}}" placeholder="Same value as PHLOAT_UPLOAD_SECRET">
-        <div class="help-text">Sent as X-pHloat-Token on HTTPS uploads. Defaults to the API key if blank.</div>
+        <input type="password" id="uploadSecret" name="uploadSecret" value="" placeholder="{{UPLOAD_SECRET_SET}}">
+        <div class="help-text">Sent as X-pHloat-Token to Tilt Pi / in the JSON body to Google Apps Script. Leave blank to keep the current token.</div>
       </div>
 
       <button type="submit">Save Configuration</button>
