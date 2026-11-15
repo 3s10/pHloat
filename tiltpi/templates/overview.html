@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{#
+  overview.html: the home page. Three lists: batches fermenting now (a card each, with their
+  newest gravity, pH and temperature), devices that are reporting but not on a batch, and
+  finished batches. `readings` is a macro: a reusable snippet that draws the value tiles.
+#}
+{% macro readings(rows) %}
+<dl class="stats">
+{% for r in rows if r.metric in ("sg", "ph", "temp_c") %}
+  <div><dt>{{ METRIC_LABELS[r.metric] }}<small>{{ device_label(r) }}</small></dt>
+  <dd>{{ fmt_value(r.metric, r.value) }}</dd><small>{{ r.ts | local }}</small></div>
+{% endfor %}
+</dl>
+{% endmacro %}
+{% block main %}
+<h1>Fermenting now</h1>
+{% if not active %}<p class="empty">No active batches. Start one with <a href="{{ url_for('ui.batch_new') }}">New batch</a>.</p>{% endif %}
+<div class="cards">
+{% for batch, latest in active %}
+  <a class="card" href="{{ url_for('ui.batch', batch_id=batch.id) }}">
+    <h2>{{ batch.name }}</h2>
+    <p class="meta">{{ batch.fermenter_tag or "No fermenter tag" }} · since {{ batch.started_at | local("%d %b") }}</p>
+    {% if latest %}{{ readings(latest) }}{% else %}<p class="empty">No readings yet.</p>{% endif %}
+  </a>
+{% endfor %}
+</div>
+
+{% if unassigned %}
+<h1>Devices not on a batch</h1>
+<div class="cards">
+{% for device_id, rows in unassigned | groupby("device_id") %}
+  <div class="card">
+    <h2>{{ device_label(rows[0]) }}</h2>
+    <p class="meta">{{ rows[0].kind }} · {{ rows[0].ident }}</p>
+    {{ readings(rows) }}
+  </div>
+{% endfor %}
+</div>
+{% endif %}
+
+{% if finished %}
+<h1>Finished</h1>
+<ul class="list">
+{% for batch in finished %}
+  <li><a href="{{ url_for('ui.batch', batch_id=batch.id) }}">{{ batch.name }}</a>
+  <span class="meta">{{ batch.fermenter_tag or "" }} · {{ batch.started_at | local("%d %b") }} to {{ batch.ended_at | local("%d %b %Y") }}
+  · {{ "archived" if batch.archived_at else "not archived" }}</span></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

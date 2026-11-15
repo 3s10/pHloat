@@ -1,0 +1,360 @@
+# --------------------------------------------------------------------------------------------
+# HOW TO READ THIS FILE (for someone new to ESPHome)
+#
+# ESPHome builds the firmware for the board from this one text file. You do not write a program
+# from top to bottom; you DESCRIBE the board: which parts are connected to which pins, and what
+# should happen when. ESPHome generates the C++ program from that description.
+#
+#   - Each top-level word (esphome:, wifi:, sensor:, ...) switches on one feature, called a
+#     "component". Indentation shows what belongs to what, so the spaces matter.
+#   - `id:` gives a part a name that other parts of this file use to refer to it.
+#   - `name:` is the label it gets in Home Assistant. A part with no name is internal only.
+#   - `${something}` is replaced by the value of `something` from the `substitutions:` list at
+#     the top. Those are the knobs you are expected to change.
+#   - `!secret xyz` is replaced by the value of `xyz` from secrets.yaml, a separate file that is
+#     never shared, so passwords are not written here.
+#   - `lambda: |-` introduces a few lines of C++ for logic that plain YAML can't express.
+#     Inside a lambda, id(name) refers to the part with that id, and comments start with //.
+#
+# Words used below:
+#   GPIO     a numbered pin on the microcontroller that the firmware can read or drive.
+#   I2C      a two-wire bus (data + clock) for talking to chips; each chip has an address.
+#   BLE      Bluetooth Low Energy. The Tilt broadcasts its readings over it.
+#   NaN      "not a number": the value a sensor has when it has no reading. std::isnan() tests for it.
+#   OTA      "over the air": updating the firmware over Wi-Fi instead of a USB cable.
+# --------------------------------------------------------------------------------------------
+# pHloat sensor node, rev A PCB (XIAO ESP32-S3 + Atlas pH OEM).
+# Each wake: read the Tilt over BLE, read pH compensated with the Tilt temperature,
+# publish to Home Assistant, POST to the pHloat server on the Tilt Pi, deep sleep.
+# A fresh power-up (new cell) stays awake for `maintenance_time` for calibration and OTA.
+#
+#   esphome config phloat.yaml     # validate
+#   esphome run phloat.yaml        # build + flash
+
+# --------------------------------------------------------------------------------------------
+# SUBSTITUTIONS: the settings for this particular sensor. Change these, not the rest of the file.
+# --------------------------------------------------------------------------------------------
+substitutions:
+  name: phloat-1                 # also the "device" name sent to the Tilt Pi (letters, digits, - and _ only)
+  friendly_name: pHloat 1
+  # Tilt colour: 0x10 red, 0x20 green, 0x30 black, 0x40 purple, 0x50 orange, 0x60 blue, 0x70 yellow, 0x80 pink
+  tilt_color: "0x10"
+  sleep_time: 15min
+  maintenance_time: 10min
+  tilt_wait: 20s                 # how long to listen for the Tilt before giving up (pH then assumes 25 C)
+  settle_ms: "5000"              # minimum time the pH module is powered before the reading that counts
+  ha_wait: 15s                   # how long to wait for Home Assistant to connect; set 0s if you don't run HA
+  battery_cutoff: "3.2"          # volts; below this the node sleeps until the cell is swapped
+  battery_cal: "2.0"             # divider ratio (470k/470k). Trim against a multimeter.
+  buffer_low: "4.00"
+  buffer_mid: "7.00"
+  buffer_high: "10.00"
+
+# --------------------------------------------------------------------------------------------
+# THE BOARD ITSELF, and what to do at power-up.
+# `on_boot` lists actions to run while starting. Parts start in order of "priority", highest
+# first. The I2C bus starts at priority 1000, so the first action below (priority 1100) runs
+# BEFORE it: it switches on GPIO5, which supplies power to the pH chip and the I2C pull-up
+# resistors. The bus must find them powered or it reports a fault.
+# The second action (priority -100, i.e. after everything else is up) starts the main routine.
+# --------------------------------------------------------------------------------------------
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: 1100             # before the I2C bus (1000): power the pH module and the I2C pull-ups
+      then:
+        - lambda: |-
+            gpio_set_direction(GPIO_NUM_5, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_5, 1);
+    - priority: -100
+      then:
+        - script.execute: cycle
+
+# --------------------------------------------------------------------------------------------
+# WHICH MICROCONTROLLER this is, and which software framework to build with.
+# --------------------------------------------------------------------------------------------
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+# --------------------------------------------------------------------------------------------
+# WHERE TO FIND THE CUSTOM pH DRIVER: the `components/ph_oem` folder next to this file.
+# --------------------------------------------------------------------------------------------
+external_components:
+  - source: components
+
+# --------------------------------------------------------------------------------------------
+# STANDARD SERVICES.
+#   logger   prints progress messages over USB (and to the ESPHome log viewer).
+#   api      the encrypted link Home Assistant uses to read this device.
+#   ota      lets new firmware be sent over Wi-Fi.
+#   wifi     which network to join. If it can't join for a minute, it starts its own small
+#            network ("ap") so you can connect to it and enter new Wi-Fi details.
+# --------------------------------------------------------------------------------------------
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s             # don't reboot when Home Assistant isn't there
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:                            # only comes up after 1 min without Wi-Fi, i.e. in the maintenance window
+    ssid: ${name}-setup
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+# --------------------------------------------------------------------------------------------
+# DEEP SLEEP: the reason one battery lasts. Between readings the board switches almost
+# everything off. When the time is up it restarts from scratch, exactly like a power-up,
+# so the whole file runs again each wake.
+# --------------------------------------------------------------------------------------------
+deep_sleep:
+  id: ds
+  sleep_duration: ${sleep_time}
+
+# --------------------------------------------------------------------------------------------
+# THE I2C BUS to the pH chip, on the pins the circuit board uses.
+# `scan: false` skips the search for unknown chips at start-up; there is only the one we know.
+# --------------------------------------------------------------------------------------------
+i2c:
+  sda: GPIO4
+  scl: GPIO6
+  scan: false
+  frequency: 100kHz
+
+# --------------------------------------------------------------------------------------------
+# HTTP CLIENT: lets the board send a web request to the hub on the Raspberry Pi.
+# --------------------------------------------------------------------------------------------
+http_request:
+  verify_ssl: false              # ponytail: plain HTTP on the LAN, as the upload contract allows
+  timeout: 5s
+
+# --------------------------------------------------------------------------------------------
+# LISTENING FOR THE TILT.
+# The Tilt broadcasts a short radio message about once a second. `on_ble_advertise` runs the
+# lambda below for EVERY Bluetooth message heard, from any device nearby, with the message in
+# `x`. The lambda ignores everything that is not our colour of Tilt, then decodes the two
+# numbers. The message layout is explained in tiltpi/phloat_helpers.py.
+# `active: false` means listen only (never transmit), which saves power.
+# --------------------------------------------------------------------------------------------
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          // Tilt = iBeacon with UUID A495BBx0-C5B1-4B44-B512-1370F02D74DE, major = degF, minor = SG x 1000.
+          // Tilt Pro sends degF x 10 and SG x 10000.
+          static const uint8_t TILT[16] = {0xA4, 0x95, 0xBB, ${tilt_color}, 0xC5, 0xB1, 0x4B, 0x44,
+                                           0xB5, 0x12, 0x13, 0x70, 0xF0, 0x2D, 0x74, 0xDE};
+          if (id(tilt_sg).has_state()) return;   // one reading per wake is enough
+          for (auto &d : x.get_manufacturer_datas()) {
+            if (d.uuid != esp32_ble_tracker::ESPBTUUID::from_uint16(0x004C) || d.data.size() != 23 ||
+                d.data[0] != 0x02 || d.data[1] != 0x15 || memcmp(&d.data[2], TILT, 16) != 0)
+              continue;
+            float major = (d.data[18] << 8) | d.data[19];
+            float minor = (d.data[20] << 8) | d.data[21];
+            bool pro = minor >= 5000;
+            id(tilt_sg).publish_state(minor / (pro ? 10000.0f : 1000.0f));
+            id(tilt_temp).publish_state((major / (pro ? 10.0f : 1.0f) - 32.0f) / 1.8f);
+            id(tilt_rssi).publish_state(x.get_rssi());
+          }
+
+# --------------------------------------------------------------------------------------------
+# A VARIABLE the lambdas can share: are we in the stay-awake maintenance window?
+# --------------------------------------------------------------------------------------------
+globals:
+  - id: maintenance
+    type: bool
+    initial_value: "false"
+
+# --------------------------------------------------------------------------------------------
+# SENSORS: every number this device measures or publishes.
+#   ph          the pH chip, using the Tilt temperature for compensation
+#   tilt_sg     gravity, filled in by the Bluetooth lambda above   ("template" = set from code)
+#   tilt_temp   beer temperature from the Tilt
+#   tilt_rssi   how strongly the Tilt was heard (diagnostic)
+#   battery     cell voltage. The board halves it with two resistors before the pin, because the
+#               pin can't take the full voltage; `multiply` doubles it back.
+#   cal_status  which pH calibration points are stored in the chip
+# `update_interval: never` means "don't read on a timer"; the main routine asks when it wants one.
+# --------------------------------------------------------------------------------------------
+sensor:
+  - platform: ph_oem
+    id: ph
+    name: pH
+    temperature_sensor: tilt_temp
+  - platform: template
+    id: tilt_sg
+    name: Gravity
+    unit_of_measurement: SG
+    accuracy_decimals: 3
+    state_class: measurement
+    icon: mdi:beer
+  - platform: template
+    id: tilt_temp
+    name: Beer temperature
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+  - platform: template
+    id: tilt_rssi
+    name: Tilt signal
+    unit_of_measurement: dBm
+    device_class: signal_strength
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: adc
+    id: battery
+    name: Battery
+    pin: GPIO7
+    attenuation: 12db
+    update_interval: never
+    device_class: voltage
+    accuracy_decimals: 2
+    filters:
+      - multiply: ${battery_cal}
+  - platform: template
+    id: cal_status
+    name: pH calibration points      # 0 none, 2 mid, 3 mid+low, 6 mid+high, 7 all three
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+    lambda: return id(ph).calibration_status();
+
+# Calibration: fresh power-up, probe in the buffer, wait for pH to stop moving, press. Mid first.
+# --------------------------------------------------------------------------------------------
+# BUTTONS that appear in Home Assistant.
+# How to calibrate: put in a fresh cell (the board then stays awake for the maintenance window),
+# stand the probe in a buffer solution, wait until the pH reading stops moving, and press the
+# matching button. Mid (pH 7) must be done first.
+# --------------------------------------------------------------------------------------------
+button:
+  - platform: template
+    name: Calibrate mid
+    entity_category: config
+    on_press:
+      - lambda: id(ph).calibrate(3, ${buffer_mid});
+      - delay: 1s
+      - component.update: cal_status
+  - platform: template
+    name: Calibrate low
+    entity_category: config
+    on_press:
+      - lambda: id(ph).calibrate(2, ${buffer_low});
+      - delay: 1s
+      - component.update: cal_status
+  - platform: template
+    name: Calibrate high
+    entity_category: config
+    on_press:
+      - lambda: id(ph).calibrate(4, ${buffer_high});
+      - delay: 1s
+      - component.update: cal_status
+  - platform: template
+    name: Clear calibration
+    entity_category: config
+    on_press:
+      - lambda: id(ph).clear_calibration();
+      - delay: 1s
+      - component.update: cal_status
+  - platform: template
+    name: Sleep now
+    entity_category: config
+    on_press:
+      - script.stop: cycle
+      - deep_sleep.enter: ds
+
+# --------------------------------------------------------------------------------------------
+# A TIMER: every 5 seconds, but only during the maintenance window, take a fresh pH reading so
+# you can watch it settle while calibrating.
+# --------------------------------------------------------------------------------------------
+interval:
+  - interval: 5s                 # live pH while calibrating
+    then:
+      - if:
+          condition:
+            lambda: return id(maintenance);
+          then:
+            - component.update: ph
+
+# --------------------------------------------------------------------------------------------
+# THE MAIN ROUTINE. It runs once per wake, top to bottom:
+#   1. Read the battery. If the cell is flat, sleep until it is swapped (protects the cell).
+#   2. If this is a fresh power-up rather than a timed wake, stay awake for the maintenance
+#      window so the probe can be calibrated and firmware updated.
+#   3. Wait for the Tilt (up to `tilt_wait`).
+#   4. Wait until the pH chip has been powered long enough to settle, then take the reading.
+#   5. Send everything to the hub on the Pi.
+#   6. Give Home Assistant a moment to collect the values, then go back to deep sleep.
+# `wait_until` pauses the routine until its condition is true or its timeout runs out; the rest
+# of the firmware (Wi-Fi, Bluetooth) keeps running meanwhile.
+# --------------------------------------------------------------------------------------------
+script:
+  - id: cycle
+    then:
+      - component.update: battery
+      - if:
+          # The > 1.0 guard keeps a missing or broken divider from locking the node out of OTA.
+          condition:
+            lambda: return id(battery).state > 1.0f && id(battery).state < ${battery_cutoff};
+          then:
+            - logger.log: "Battery flat: sleeping until the cell is swapped"
+            - lambda: esp_deep_sleep_start();   # no wake source set: only a power cycle wakes it
+      - component.update: cal_status
+      - if:
+          condition:
+            lambda: return esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER;
+          then:
+            - logger.log: "Fresh power-up: staying awake for calibration and OTA"
+            - globals.set: {id: maintenance, value: "true"}
+            - delay: ${maintenance_time}
+            - globals.set: {id: maintenance, value: "false"}
+      - wait_until:
+          condition:
+            lambda: return id(tilt_temp).has_state();
+          timeout: ${tilt_wait}
+      - wait_until:
+          condition:
+            lambda: return millis() > ${settle_ms};
+      - component.update: ph
+      - delay: 1500ms            # the driver publishes 900 ms after update
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 15s
+      - if:
+          condition:
+            lambda: return !std::isnan(id(ph).state) && wifi::global_wifi_component->is_connected();
+          then:
+            - http_request.post:
+                url: !secret tiltpi_url
+                request_headers:
+                  X-pHloat-Token: !secret phloat_upload_secret
+                json: |-
+                  root["device"] = "${name}";
+                  root["pH"] = id(ph).state;
+                  root["battery"] = id(battery).state;
+                  if (id(tilt_sg).has_state()) {
+                    root["temperature"] = id(tilt_temp).state;   // degC
+                    root["sg"] = id(tilt_sg).state;
+                    root["tiltTemp"] = id(tilt_temp).state * 1.8f + 32.0f;   // degF, as the Tilt reports it
+                    root["tiltColor"] = "${tilt_color}";
+                  }
+      - wait_until:
+          condition:
+            api.connected:
+          timeout: ${ha_wait}
+      - delay: 1s                # let the states flush to Home Assistant
+      - deep_sleep.enter: ds

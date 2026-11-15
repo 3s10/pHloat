@@ -1,0 +1,135 @@
+/* style.css: how every hub page looks. One file, no framework.
+
+   A stylesheet is a list of rules: "things matching this selector get these properties".
+     .card            anything with class="card"
+     .stats dd        a <dd> inside something with class="stats"
+     var(--accent)    a named value defined once (in :root) and reused everywhere
+
+   Phones and desktops share this one file. Layouts use "grid" and "flex" with wrapping, so
+   columns rearrange themselves to fit the screen width instead of needing a separate design.
+   Buttons and inputs are at least 44 px tall so they are easy to hit with a finger. */
+
+/* Colours, defined once. The second block swaps them when the device is set to dark mode. */
+:root {
+  --bg: #f6f3ee; --surface: #fffdf9; --ink: #1f1b16; --muted: #6b6359; --line: #e2dbd0;
+  --accent: #b45309; --accent-ink: #fff; --flash: #fef3c7;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15130f; --surface: #1f1c17; --ink: #f1ece4; --muted: #a39a8d; --line: #353028;
+          --accent: #f59e0b; --accent-ink: #1a1408; --flash: #3b2f12; }
+}
+/* Page basics: fonts, the centred content column, headings and small grey text. */
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+a { color: var(--accent); }
+h1 { font-size: 1.35rem; margin: 1.6rem 0 .6rem; }
+h2 { font-size: 1.05rem; margin: 0 0 .25rem; }
+small, .meta, .hint { color: var(--muted); font-size: .85rem; }
+.meta { margin: 0 0 .6rem; }
+
+/* The top bar, which stays at the top of the screen while scrolling. */
+.bar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px;
+       background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; }
+.brand { font-size: 1.3rem; font-weight: 600; color: var(--ink); text-decoration: none; letter-spacing: .01em; }
+.brand b { color: var(--accent); }
+
+/* Buttons, and the rows that hold them. */
+.button { display: inline-block; padding: 9px 16px; border: 1px solid var(--accent); border-radius: 8px;
+          background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600;
+          text-decoration: none; cursor: pointer; min-height: 44px; }
+.button.quiet { background: transparent; color: var(--accent); }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+
+/* The one-shot status message shown after an action. */
+.flash { background: var(--flash); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+.empty { color: var(--muted); }
+
+/* Cards: as many columns as fit, each at least 280 px wide. */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.card { display: block; background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+        padding: 16px; color: inherit; text-decoration: none; }
+a.card:hover, a.card:focus-visible { border-color: var(--accent); }
+
+/* Value tiles: a small label above a large number. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 0; }
+.stats.wide { margin: 16px 0; }
+.stats > div { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.stats dt { font-size: .8rem; color: var(--muted); }
+.stats dt small { display: block; font-size: .75rem; }
+.stats dd { margin: 0; font-size: 1.6rem; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.2; }
+
+/* The batch facts and free-text notes. */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 4px 18px; margin: 12px 0; }
+.facts dt { font-size: .8rem; color: var(--muted); }
+.facts dd { margin: 0; }
+.notes { white-space: pre-wrap; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+
+/* Charts. The drawing scales to the width of its box. */
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 14px 0; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .85rem; color: var(--muted); margin-top: 6px; }
+.legend i { display: inline-block; width: 12px; height: 3px; margin-right: 5px; vertical-align: middle; }
+
+/* Plain lists and the batch log. */
+.list, .log { list-style: none; padding: 0; margin: 0; }
+.list li, .log li { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.log time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 8px; }
+.log .kind { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); margin-right: 8px; }
+
+/* Forms: labels above full-width inputs. */
+label { display: block; font-size: .85rem; color: var(--muted); }
+input, select, textarea { display: block; width: 100%; margin-top: 3px; padding: 9px 10px; min-height: 44px;
+                          font: inherit; color: var(--ink); background: var(--surface);
+                          border: 1px solid var(--line); border-radius: 8px; }
+input[type=checkbox] { display: inline-block; width: 20px; min-height: 20px; height: 20px; margin: 0 8px 0 0; vertical-align: middle; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.form { display: grid; gap: 14px; max-width: 640px; }
+.check { color: var(--ink); font-size: 1rem; padding: 6px 0; }
+fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; margin: 0; }
+legend { font-size: .85rem; color: var(--muted); padding: 0 6px; }
+.logform { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; background: var(--surface);
+           border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.logform label { flex: 1 1 110px; }
+.logform .grow { flex: 3 1 240px; }
+
+/* Navigation links, delete links, and the Devices page rows. */
+.bar nav { display: flex; align-items: center; gap: 14px; }
+.bar nav a:not(.button) { color: var(--muted); text-decoration: none; font-size: .9rem; }
+.danger { color: #b91c1c; border-color: #b91c1c; }
+@media (prefers-color-scheme: dark) { .danger { color: #f87171; border-color: #f87171; } }
+.inline { display: inline; margin-left: 8px; }
+.link { background: none; border: 0; padding: 4px 6px; font: inherit; font-size: .85rem; color: var(--accent);
+        text-decoration: underline; cursor: pointer; min-height: 32px; }
+.link.danger { color: #b91c1c; }
+@media (prefers-color-scheme: dark) { .link.danger { color: #f87171; } }
+.device { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; }
+.rename { display: flex; align-items: flex-end; gap: 8px; flex: 1 1 320px; }
+.rename label { flex: 1; }
+
+/* Interactive charts (chart.js): pan-y lets a finger still scroll the page up and down over a chart. */
+.plot .canvas { touch-action: pan-y; cursor: crosshair; user-select: none; }
+.plot .cursor { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.plot .select { fill: var(--accent); opacity: .18; }
+.tipbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 34px; }
+.tip { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tip b { color: var(--ink); }
+.tip i { display: inline-block; width: 10px; height: 3px; margin-right: 5px; vertical-align: middle; }
+.reset { font: inherit; font-size: .8rem; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+         background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; }
+
+/* The Controllers page: the settings grid and the 'waiting' markers. */
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 18px; margin-top: 12px; }
+.settings .actions, .settings .check { grid-column: 1 / -1; }
+.badge { background: var(--flash); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: .85rem; }
+.pending { color: var(--accent); font-weight: 600; }
+
+/* The fold-out recipe summary on a batch page. */
+.recipe { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 12px 0; }
+.recipe summary { cursor: pointer; font-weight: 600; min-height: 32px; }
+.recipe h3 { font-size: .9rem; margin: 12px 0 2px; color: var(--muted); }
+a.link { display: inline-block; }

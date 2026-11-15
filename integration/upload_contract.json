@@ -1,31 +1,42 @@
 {
-  "version": 1,
-  "description": "Shared pHloat remote upload contract used by relay firmware, Google Apps Script, and Tilt Pi server.",
+  "version": 2,
+  "description": "Shared pHloat upload contract. v2 is what the pHloat hub (tiltpi/) accepts; v1 payloads are still valid v2. An upload must carry at least one reading or a settings check-in. GoogleAppsScript.js still implements v1 only.",
   "auth_header": "X-pHloat-Token",
   "endpoints": {
     "google_apps_script": {
       "method": "POST",
       "url_pattern": "https://script.google.com/macros/s/...",
-      "notes": "Deploy GoogleAppsScript.js as a web app (Execute as: Me, Anyone). Set PHLOAT_UPLOAD_SECRET in Script Properties."
+      "notes": "v1 only. Deploy GoogleAppsScript.js as a web app (Execute as: Me, Anyone). Set PHLOAT_UPLOAD_SECRET in Script Properties."
     },
-    "tilt_pi": {
+    "hub": {
       "method": "POST",
-      "path": "/api/ph",
+      "paths": [
+        "/api/ph",
+        "/api/readings"
+      ],
       "url_example": "http://192.168.1.50:5000/api/ph",
-      "notes": "Set upload_secret in config.json or PHLOAT_UPLOAD_SECRET env var. HTTP allowed on local network."
+      "notes": "Both paths are the same handler. Set upload_secret in config.json or PHLOAT_UPLOAD_SECRET env var. HTTP allowed on the local network; never expose to the internet."
     }
   },
   "payload": {
     "device": "string (sanitized device name)",
-    "pH": "number or decimal string 0-14",
-    "temperature": "number or string (optional)",
-    "timestamp": "ISO-8601 or YYYY-MM-DD HH:MM:SS",
-    "readingNumber": "integer"
+    "pH": "number or decimal string 0-14 (optional in v2)",
+    "temperature": "number, degC (optional)",
+    "sg": "number, specific gravity read from the Tilt (optional, v2)",
+    "battery": "number, volts (optional, v2)",
+    "tiltColor": "colour name or UUID byte such as \"0x10\" (optional, v2)",
+    "tiltTemp": "number, degF as the Tilt reports it (optional, v2; not stored, temperature carries it)",
+    "metrics": "object of {metric_name: number} for anything else, names [a-z][a-z0-9_]* (optional, v2)",
+    "timestamp": "ISO-8601 (optional; the hub's clock is used when absent)",
+    "readingNumber": "integer (v1; ignored by the hub)",
+    "settings": "object of a controller's current settings, e.g. {\"target_c\": 19, \"mode\": \"auto\"} (optional, v2; names and ranges in tiltpi/controller_settings.py)",
+    "status": "string, a controller's one-line status, at most 80 characters (optional, v2)"
   },
   "response": {
     "status": "success | error",
     "message": "string",
-    "tilt_matched": "boolean (Tilt Pi and GAS when Tilt data found)"
+    "stored": "integer, metrics stored (hub)",
+    "settings": "object: the settings the hub wants the controller to run (hub; empty unless settings were sent)"
   },
   "time_match_window_seconds": 60
 }

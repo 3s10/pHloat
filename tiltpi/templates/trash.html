@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{#
+  trash.html: deleted batches, log entries and devices, each with the days it has left and a
+  Restore button. `row` is a macro that draws one line of the list.
+#}
+{% block title %}Trash · pHloat{% endblock %}
+{% macro row(table, item, label) %}
+  <li>{{ label }}
+    <span class="meta">deleted {{ item.deleted_at | local("%d %b %H:%M") }} · {{ days_left(item.deleted_at) }} days left</span>
+    <form class="inline" method="post" action="{{ url_for('ui.restore', table=table, row_id=item.id) }}">
+      <button class="link">Restore</button>
+    </form></li>
+{% endmacro %}
+{% block main %}
+<h1>Trash</h1>
+<p class="hint">Deleted items stay here for {{ TRASH_DAYS }} days, then they are removed for good.</p>
+{% if not (items.batches or items.events or items.devices) %}<p class="empty">Nothing in the trash.</p>{% endif %}
+{% if items.batches %}<h2>Batches</h2><ul class="list">
+  {% for b in items.batches %}{{ row("batches", b, b.name) }}{% endfor %}</ul>{% endif %}
+{% if items.events %}<h2>Log entries</h2><ul class="list">
+  {% for e in items.events %}{{ row("events", e, e.kind.replace("_", " ") ~ ": " ~ (e.note or "") ~ (" " ~ e.value if e.value is not none else "")) }}{% endfor %}</ul>{% endif %}
+{% if items.devices %}<h2>Devices</h2><ul class="list">
+  {% for d in items.devices %}{{ row("devices", d, device_label(d)) }}{% endfor %}</ul>{% endif %}
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{#
+  event_form.html: the form for correcting one log entry. It shows the entry's current values;
+  saving sends them to event_edit() in ui.py. Leaving "When" blank keeps the original time.
+#}
+{% block title %}Edit log entry · pHloat{% endblock %}
+{% block main %}
+<h1>Edit log entry</h1>
+<p class="meta">Recorded {{ event.ts | local("%d %b %Y %H:%M") }}</p>
+<form class="form" method="post">
+  <label>Type <select name="kind">{% for k in kinds %}<option value="{{ k }}" {{ "selected" if k == event.kind }}>{{ k.replace("_", " ") }}</option>{% endfor %}</select></label>
+  <label>Note <input name="note" value="{{ event.note or '' }}"></label>
+  <label>Value <input name="value" inputmode="decimal" value="{{ event.value if event.value is not none else '' }}"></label>
+  <label>Unit <input name="unit" value="{{ event.unit or '' }}"></label>
+  <label>When <input type="datetime-local" name="ts"><small>Leave blank to keep the original time.</small></label>
+  <div class="actions">
+    <button class="button">Save</button>
+    <a class="button quiet" href="{{ url_for('ui.batch', batch_id=event.batch_id) }}#log">Cancel</a>
+  </div>
+</form>
+{% endblock %}

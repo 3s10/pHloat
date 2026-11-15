@@ -1,0 +1,38 @@
+<!doctype html>
+{#
+  base.html: the frame every page shares (the top bar, the stylesheet link, status messages).
+
+  These files are "templates": HTML with placeholders that ui.py fills in.
+    {{ something }}        is replaced by a value. It is escaped automatically, so text typed
+                           by a user can never turn into HTML.
+    {% if %} / {% for %}   show part of the page conditionally, or once per item in a list.
+    {% block name %}       a named gap. Other pages start with {% extends "base.html" %} and
+                           supply the content for the gaps.
+    url_for('ui.x')        the web address of the function x in ui.py, so addresses are never
+                           typed by hand.
+    value | local          passes a value through a helper (here: UTC time -> local time text).
+#}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}pHloat{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="{{ url_for('ui.overview') }}">p<b>H</b>loat</a>
+  <nav>
+    <a href="{{ url_for('ui.controllers') }}">Controllers</a>
+    <a href="{{ url_for('ui.devices') }}">Devices</a>
+    <a href="{{ url_for('ui.trash') }}">Trash</a>
+    <a class="button" href="{{ url_for('ui.batch_new') }}">New batch</a>
+  </nav>
+</header>
+<main>
+{% for message in get_flashed_messages() %}<p class="flash" role="status">{{ message }}</p>{% endfor %}
+{% block main %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

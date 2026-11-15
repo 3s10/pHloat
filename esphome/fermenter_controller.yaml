@@ -1,0 +1,515 @@
+# --------------------------------------------------------------------------------------------
+# HOW TO READ THIS FILE (for someone new to ESPHome)
+#
+# ESPHome builds the firmware for the board from this one text file. You do not write a program
+# from top to bottom; you DESCRIBE the board: which parts are connected to which pins, and what
+# should happen when. ESPHome generates the C++ program from that description.
+#
+#   - Each top-level word (esphome:, wifi:, sensor:, ...) switches on one feature, called a
+#     "component". Indentation shows what belongs to what, so the spaces matter.
+#   - `id:` gives a part a name that other parts of this file use to refer to it.
+#   - `name:` is the label it gets in Home Assistant. A part with no name is internal only.
+#   - `${something}` is replaced by the value of `something` from the `substitutions:` list at
+#     the top. Those are the knobs you are expected to change.
+#   - `!secret xyz` is replaced by the value of `xyz` from secrets.yaml, a separate file that is
+#     never shared, so passwords are not written here.
+#   - `lambda: |-` introduces a few lines of C++ for logic that plain YAML can't express.
+#     Inside a lambda, id(name) refers to the part with that id, and comments start with //.
+#
+# Words used below:
+#   GPIO     a numbered pin on the microcontroller that the firmware can read or drive.
+#   I2C      a two-wire bus (data + clock) for talking to chips; each chip has an address.
+#   BLE      Bluetooth Low Energy. The Tilt broadcasts its readings over it.
+#   NaN      "not a number": the value a sensor has when it has no reading. std::isnan() tests for it.
+#   OTA      "over the air": updating the firmware over Wi-Fi instead of a USB cable.
+#
+#   PWM      "pulse-width modulation": switching power on and off very fast. The fraction of
+#            time it is on (the "duty", 0 to 1) sets how fast a pump runs.
+#   PID      the control method used here; explained above the `climate:` block.
+#   DS18B20  a digital temperature probe. Many can share one wire ("1-Wire"); each has a
+#            unique address.
+# --------------------------------------------------------------------------------------------
+# Fermenter temperature controller: XIAO ESP32-S3, two variable-speed DC pumps, DS18B20 probes.
+#   cool pump -> glycol/chilled water through the cooling jacket
+#   warm pump -> warm water (aquarium-heated reservoir) through the reactor rod
+# The control loop runs on this board, so it holds temperature with Wi-Fi, Home Assistant
+# and the Pi all down. Any fault ends with both pumps off.
+#
+# The hub on the Pi is the master copy of the settings. Every `sync_interval` this board
+# reports its settings to the hub and applies whatever the hub answers (tiltpi/controller_settings.py).
+# Settings are kept in flash, so the board carries on alone with the last ones it was given.
+# Home Assistant sees everything but is for dashboards: a change made there is put back by the hub.
+#
+#   esphome config fermenter_controller.yaml
+#   esphome run fermenter_controller.yaml       (from PowerShell or cmd, not Git Bash)
+
+# --------------------------------------------------------------------------------------------
+# SUBSTITUTIONS: the settings for this particular controller.
+# The first group is fixed in the firmware. The second group ("first-boot values") is only used
+# the very first time the board starts; after that the hub owns those settings.
+# --------------------------------------------------------------------------------------------
+substitutions:
+  name: fermenter-1              # also the device name sent to the hub (letters, digits, - and _ only)
+  friendly_name: Fermenter 1
+  # Probe addresses: flash once, read them from the boot log ("Found sensors"), paste here.
+  coolant_probe: "0x0000000000000128"
+  warm_probe: "0x0000000000000228"
+  ambient_probe: "0x0000000000000328"
+  well_probe: "0x0000000000000428"   # optional thermowell probe in the beer; leave as is if not fitted
+  pump_pwm_hz: "1000"            # raise toward 20000 if the pumps whine and your MOSFETs switch cleanly
+  sync_interval: 15s             # check-in with the hub
+  log_every: "4"                 # send readings to the hub on every Nth check-in (4 x 15 s = once a minute)
+  # --- first-boot values only. After that the hub sets these (Controllers page) and flash remembers them.
+  default_target: "19"           # degC
+  tilt_color: "0x10"             # 0x10 red, 0x20 green, 0x30 black, 0x40 purple, 0x50 orange, 0x60 blue, 0x70 yellow, 0x80 pink
+  prefer_well_probe: "false"     # a standard Tilt reports whole degF (0.56 C steps); a thermowell probe is finer
+  tilt_timeout_s: "300"          # Tilt silent this long = Tilt lost
+  warm_fluid_max: "35"           # degC; never pump warming fluid hotter than this through the beer
+  min_delta: "1.0"               # degC the fluid must be colder/warmer than the beer to be worth pumping
+  pump_min: "0.25"               # lowest duty at which your pump actually turns
+  # Starting guesses, not tuned values. A fermenter responds over hours: tune on real hardware.
+  kp: "0.5"                      # 2 C of error = full pump speed
+  ki: "0.0005"
+  kd: "0"
+  deadband: "0.3"                # degC either side of target where the pumps rest
+
+# --------------------------------------------------------------------------------------------
+# THE BOARD ITSELF. At the end of start-up, load the saved settings into the control loop.
+# --------------------------------------------------------------------------------------------
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: apply_settings
+
+# --------------------------------------------------------------------------------------------
+# WHICH MICROCONTROLLER this is, and which software framework to build with.
+# --------------------------------------------------------------------------------------------
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+# --------------------------------------------------------------------------------------------
+# STANDARD SERVICES: log messages, the Home Assistant link, over-the-air updates, Wi-Fi.
+# The two `reboot_timeout: 0s` lines matter. By default ESPHome restarts a board that has lost
+# Wi-Fi or Home Assistant for 15 minutes, hoping that fixes it. A restart stops the pumps for a
+# moment, and this board must keep controlling the fermenter through an outage, so that
+# behaviour is switched off.
+# --------------------------------------------------------------------------------------------
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s             # never reboot (and stop the pumps) just because Home Assistant is away
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s             # keep controlling through a Wi-Fi outage
+  ap:
+    ssid: ${name}-setup
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+# --------------------------------------------------------------------------------------------
+# HTTP CLIENT: lets the board send a web request to the hub on the Raspberry Pi.
+# --------------------------------------------------------------------------------------------
+http_request:
+  verify_ssl: false              # ponytail: plain HTTP on the LAN, as the upload contract allows
+  timeout: 5s
+
+# --------------------------------------------------------------------------------------------
+# VARIABLES shared between the lambdas.
+# The first three are working values. The `s_...` ones are the settings the hub controls;
+# `restore_value: yes` saves them to flash memory, so they survive a power cut and the board
+# carries on with the last settings it was given.
+# --------------------------------------------------------------------------------------------
+globals:
+  - id: cool_req                 # what the PID asks for, 0..1, before the safety guards
+    type: float
+    initial_value: "0"
+  - id: warm_req
+    type: float
+    initial_value: "0"
+  - id: tilt_seen_ms
+    type: uint32_t
+    initial_value: "0"
+  # Settings the hub owns. restore_value keeps them through power cuts.
+  - {id: s_deadband, type: float, restore_value: yes, initial_value: "${deadband}"}
+  - {id: s_kp, type: float, restore_value: yes, initial_value: "${kp}"}
+  - {id: s_ki, type: float, restore_value: yes, initial_value: "${ki}"}
+  - {id: s_kd, type: float, restore_value: yes, initial_value: "${kd}"}
+  - {id: s_warm_max, type: float, restore_value: yes, initial_value: "${warm_fluid_max}"}
+  - {id: s_min_delta, type: float, restore_value: yes, initial_value: "${min_delta}"}
+  - {id: s_pump_min, type: float, restore_value: yes, initial_value: "${pump_min}"}
+  - {id: s_tilt_timeout, type: int, restore_value: yes, initial_value: "${tilt_timeout_s}"}
+  - {id: s_tilt_color, type: int, restore_value: yes, initial_value: "${tilt_color}"}
+  - {id: s_prefer_well, type: bool, restore_value: yes, initial_value: "${prefer_well_probe}"}
+
+# --------------------------------------------------------------------------------------------
+# THE TEMPERATURE PROBE BUS. All the DS18B20 probes share this one pin.
+# --------------------------------------------------------------------------------------------
+one_wire:
+  - platform: gpio
+    pin: GPIO4                   # D3; one 4.7k pull-up to 3V3 for the whole bus
+
+# --------------------------------------------------------------------------------------------
+# OUTPUTS: the two pumps, plus two "virtual" outputs used for safety.
+#
+# Each pump is driven through a transistor by a PWM signal (`ledc` is the ESP32's PWM hardware).
+#   min_power           a pump stalls below a certain speed; this is the lowest speed ever used.
+#   zero_means_zero     ...but "off" still means fully off, not min_power.
+#
+# The control loop (below) does NOT drive the pumps directly. It writes its wishes into the two
+# `template` outputs, which only store the number in a variable. A separate safety check (the
+# "guard", near the bottom) reads those wishes once a second and decides what the pumps really
+# do. So there is exactly one place in this file that can turn a pump on.
+# --------------------------------------------------------------------------------------------
+output:
+  - platform: ledc
+    id: cool_pump
+    pin: GPIO5                   # D4 -> MOSFET gate (10k gate pull-down holds the pump off while the ESP boots or is dead)
+    frequency: ${pump_pwm_hz}Hz
+    min_power: ${pump_min}
+    zero_means_zero: true
+  - platform: ledc
+    id: warm_pump
+    pin: GPIO6                   # D5
+    frequency: ${pump_pwm_hz}Hz
+    min_power: ${pump_min}
+    zero_means_zero: true
+  # The PID writes here, never straight to a pump. The guard interval below decides what the pumps really do.
+  - platform: template
+    id: cool_request
+    type: float
+    write_action:
+      - globals.set:
+          id: cool_req
+          value: !lambda return state;
+  - platform: template
+    id: warm_request
+    type: float
+    write_action:
+      - globals.set:
+          id: warm_req
+          value: !lambda return state;
+
+# --------------------------------------------------------------------------------------------
+# THE CONTROL LOOP (PID).
+#
+# Goal: keep the beer at the target temperature by running one pump or the other.
+# "error" = how far the beer is from the target. The output is a pump speed made of three parts:
+#   P (proportional, kp)  react to the error right now. 2 C too warm -> pump faster than 1 C.
+#   I (integral, ki)      react to error that persists. If the beer sits slightly warm for an
+#                         hour, slowly add more cooling until it actually reaches the target.
+#   D (derivative, kd)    react to how fast the error is changing, to avoid overshooting.
+# The three k values are the "gains": how strongly each part acts. They must be tuned on the
+# real fermenter; the values here are starting guesses.
+#
+# `cool_output` runs when the beer is too warm, `heat_output` when it is too cold. Inside the
+# dead band (target +/- deadband) neither runs, so the pumps are not constantly nudging.
+# The PID component also stops both outputs by itself if the beer temperature is missing.
+# --------------------------------------------------------------------------------------------
+climate:
+  - platform: pid
+    id: fermenter
+    name: Fermenter
+    sensor: beer_temp
+    default_target_temperature: ${default_target}°C
+    cool_output: cool_request
+    heat_output: warm_request
+    control_parameters:
+      kp: ${kp}
+      ki: ${ki}
+      kd: ${kd}
+    deadband_parameters:
+      threshold_high: ${deadband}°C
+      threshold_low: -${deadband}°C
+    visual:
+      min_temperature: 0°C
+      max_temperature: 30°C
+      temperature_step: 0.1°C
+
+# --------------------------------------------------------------------------------------------
+# APPLY SETTINGS: copy the saved setting values into the parts that use them. Run at start-up
+# and after every check-in with the hub.
+# --------------------------------------------------------------------------------------------
+script:
+  - id: apply_settings           # push the stored settings into the PID and the pump drivers
+    then:
+      - lambda: |-
+          id(fermenter).set_kp(id(s_kp));
+          id(fermenter).set_ki(id(s_ki));
+          id(fermenter).set_kd(id(s_kd));
+          id(fermenter).set_deadband_thresholds(-id(s_deadband), id(s_deadband));
+          id(cool_pump).set_min_power(id(s_pump_min));
+          id(warm_pump).set_min_power(id(s_pump_min));
+
+# --------------------------------------------------------------------------------------------
+# LISTENING FOR THE TILT (same method as the pHloat sensor; see tiltpi/phloat_helpers.py for
+# the message layout). It also records WHEN the Tilt was last heard, so a Tilt that has gone
+# silent can be detected.
+# --------------------------------------------------------------------------------------------
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          // Tilt = iBeacon with UUID A495BBx0-C5B1-4B44-B512-1370F02D74DE, major = degF, minor = SG x 1000.
+          // Tilt Pro sends degF x 10 and SG x 10000.
+          const uint8_t TILT[16] = {0xA4, 0x95, 0xBB, (uint8_t) id(s_tilt_color), 0xC5, 0xB1, 0x4B, 0x44,
+                                    0xB5, 0x12, 0x13, 0x70, 0xF0, 0x2D, 0x74, 0xDE};
+          static uint32_t last_publish = 0;
+          for (auto &d : x.get_manufacturer_datas()) {
+            if (d.uuid != esp32_ble_tracker::ESPBTUUID::from_uint16(0x004C) || d.data.size() != 23 ||
+                d.data[0] != 0x02 || d.data[1] != 0x15 || memcmp(&d.data[2], TILT, 16) != 0)
+              continue;
+            id(tilt_seen_ms) = millis() | 1;   // never 0, which means "never seen"
+            if (last_publish != 0 && millis() - last_publish < 10000) return;   // the Tilt talks about once a second
+            last_publish = millis() | 1;
+            float major = (d.data[18] << 8) | d.data[19];
+            float minor = (d.data[20] << 8) | d.data[21];
+            bool pro = minor >= 5000;
+            id(tilt_sg).publish_state(minor / (pro ? 10000.0f : 1000.0f));
+            id(tilt_temp).publish_state((major / (pro ? 10.0f : 1.0f) - 32.0f) / 1.8f);
+          }
+
+# --------------------------------------------------------------------------------------------
+# SENSORS.
+#   coolant_temp, warm_temp, ambient_temp, well_temp   the four wired probes (`dallas_temp`),
+#                 each picked out by its unique address
+#   tilt_temp, tilt_sg   filled in by the Bluetooth lambda above
+#   beer_temp            THE temperature the control loop uses, chosen from Tilt or thermowell
+#   cool_pct, warm_pct   what each pump is actually doing, for the dashboards
+# --------------------------------------------------------------------------------------------
+sensor:
+  - platform: dallas_temp
+    id: coolant_temp
+    name: Coolant temperature
+    address: ${coolant_probe}
+    update_interval: 10s
+  - platform: dallas_temp
+    id: warm_temp
+    name: Warming fluid temperature
+    address: ${warm_probe}
+    update_interval: 10s
+  - platform: dallas_temp
+    id: ambient_temp
+    name: Ambient temperature
+    address: ${ambient_probe}
+    update_interval: 30s
+  - platform: dallas_temp
+    id: well_temp
+    name: Thermowell temperature
+    address: ${well_probe}
+    update_interval: 10s
+  - platform: template
+    id: tilt_temp
+    name: Tilt temperature
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+  - platform: template
+    id: tilt_sg
+    name: Gravity
+    unit_of_measurement: SG
+    accuracy_decimals: 3
+    state_class: measurement
+    icon: mdi:beer
+  - platform: template
+    id: beer_temp               # what the control loop uses
+    name: Beer temperature
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 2
+  - platform: template
+    id: cool_pct
+    name: Cooling pump
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    icon: mdi:pump
+  - platform: template
+    id: warm_pct
+    name: Warming pump
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    icon: mdi:pump
+
+# --------------------------------------------------------------------------------------------
+# A LINE OF TEXT saying what the controller is doing and, if a pump is being held off, why.
+# --------------------------------------------------------------------------------------------
+text_sensor:
+  - platform: template
+    id: guard_status
+    name: Control status
+
+# --------------------------------------------------------------------------------------------
+# A BUTTON in Home Assistant that starts the PID component's automatic tuning.
+# --------------------------------------------------------------------------------------------
+button:
+  # Runs for hours. The result is printed in the log; enter it on the hub's Controllers page,
+  # because the hub's kp/ki/kd replace it at the next check-in.
+  - platform: template
+    name: PID autotune
+    entity_category: config
+    on_press:
+      - climate.pid.autotune: fermenter
+
+# --------------------------------------------------------------------------------------------
+# THREE TIMERS. These are the heart of the controller.
+#   every 10 s   choose the beer temperature (Tilt or thermowell probe)
+#   every 1 s    THE SAFETY GUARD: decide what each pump really does
+#   every 15 s   check in with the hub: report, and take any changed settings
+# --------------------------------------------------------------------------------------------
+interval:
+  # Pick the beer temperature. No fresh source = NaN, which stops both pumps (PID and guard both treat NaN as off).
+  - interval: 10s
+    then:
+      - lambda: |-
+          bool tilt_ok = id(tilt_seen_ms) != 0 && millis() - id(tilt_seen_ms) < (uint32_t) id(s_tilt_timeout) * 1000UL
+                         && !std::isnan(id(tilt_temp).state);
+          bool well_ok = !std::isnan(id(well_temp).state);
+          float t = NAN;
+          if (id(s_prefer_well)) t = well_ok ? id(well_temp).state : tilt_ok ? id(tilt_temp).state : NAN;
+          else                   t = tilt_ok ? id(tilt_temp).state : well_ok ? id(well_temp).state : NAN;
+          id(beer_temp).publish_state(t);
+
+  # Safety guard: the only code that drives the pumps. Fail-safe means both off.
+  - interval: 1s
+    then:
+      - lambda: |-
+          float beer = id(beer_temp).state, coolant = id(coolant_temp).state, warm = id(warm_temp).state;
+          float cool_out = id(cool_req), warm_out = id(warm_req);
+          auto mode = id(fermenter).mode;
+          if (mode == climate::CLIMATE_MODE_COOL) warm_out = 0;
+          if (mode == climate::CLIMATE_MODE_HEAT) cool_out = 0;
+          const char *status = "Holding";
+          if (mode == climate::CLIMATE_MODE_OFF) {
+            cool_out = warm_out = 0; status = "Off";
+          } else if (std::isnan(beer)) {
+            cool_out = warm_out = 0; status = "OFF: no beer temperature";
+          } else if (cool_out > 0 && warm_out > 0) {
+            cool_out = warm_out = 0; status = "OFF: heat and cool requested together";
+          } else if (cool_out > 0) {
+            if (std::isnan(coolant)) { cool_out = 0; status = "Cooling blocked: coolant probe missing"; }
+            else if (coolant > beer - id(s_min_delta)) { cool_out = 0; status = "Cooling blocked: coolant not cold enough"; }
+            else status = "Cooling";
+          } else if (warm_out > 0) {
+            if (std::isnan(warm)) { warm_out = 0; status = "Warming blocked: fluid probe missing"; }
+            else if (warm > id(s_warm_max)) { warm_out = 0; status = "Warming blocked: fluid too hot"; }
+            else if (warm < beer + id(s_min_delta)) { warm_out = 0; status = "Warming blocked: fluid not warm enough"; }
+            else status = "Warming";
+          }
+          id(cool_pump).set_level(cool_out);
+          id(warm_pump).set_level(warm_out);
+          static float last_cool = -1, last_warm = -1;
+          static std::string last_status;
+          if (cool_out != last_cool) { last_cool = cool_out; id(cool_pct).publish_state(cool_out * 100); }
+          if (warm_out != last_warm) { last_warm = warm_out; id(warm_pct).publish_state(warm_out * 100); }
+          if (last_status != status) { last_status = status; id(guard_status).publish_state(status); }
+
+  # Check in with the hub: report settings + status (and readings every Nth time), apply what it answers.
+  # Control never waits on this.
+  - interval: ${sync_interval}
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - http_request.post:
+                url: !secret tiltpi_url
+                request_headers:
+                  X-pHloat-Token: !secret phloat_upload_secret
+                capture_response: true
+                max_response_buffer_size: 2048
+                json: |-
+                  static const char *const COLORS[] = {"red", "green", "black", "purple", "orange", "blue", "yellow", "pink"};
+                  static uint32_t n = 0;
+                  root["device"] = "${name}";
+                  root["status"] = id(guard_status).state;
+                  auto mode = id(fermenter).mode;
+                  root["settings"]["mode"] = mode == climate::CLIMATE_MODE_OFF ? "off" : mode == climate::CLIMATE_MODE_COOL ? "cool"
+                                           : mode == climate::CLIMATE_MODE_HEAT ? "heat" : "auto";
+                  if (!std::isnan(id(fermenter).target_temperature)) root["settings"]["target_c"] = id(fermenter).target_temperature;
+                  root["settings"]["deadband_c"] = id(s_deadband);
+                  root["settings"]["kp"] = id(s_kp);
+                  root["settings"]["ki"] = id(s_ki);
+                  root["settings"]["kd"] = id(s_kd);
+                  root["settings"]["warm_fluid_max_c"] = id(s_warm_max);
+                  root["settings"]["min_delta_c"] = id(s_min_delta);
+                  root["settings"]["pump_min_pct"] = id(s_pump_min) * 100.0f;
+                  root["settings"]["tilt_timeout_s"] = id(s_tilt_timeout);
+                  root["settings"]["prefer_well_probe"] = id(s_prefer_well);
+                  int color = id(s_tilt_color) / 0x10 - 1;
+                  if (color >= 0 && color < 8) root["settings"]["tilt_color"] = COLORS[color];
+                  if (n++ % ${log_every} == 0) {
+                    auto put = [&](const char *key, float v) { if (!std::isnan(v)) root["metrics"][key] = v; };
+                    put("beer_temp_c", id(beer_temp).state);
+                    put("coolant_temp_c", id(coolant_temp).state);
+                    put("warm_fluid_temp_c", id(warm_temp).state);
+                    put("ambient_temp_c", id(ambient_temp).state);
+                    put("setpoint_c", id(fermenter).target_temperature);
+                    put("cool_pump_pct", id(cool_pct).state);
+                    put("warm_pump_pct", id(warm_pct).state);
+                  }
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) return;
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          JsonObject s = root["settings"];
+                          if (s.isNull()) return true;
+                          // Ranges match tiltpi/controller_settings.py. Out-of-range values are ignored, not clamped.
+                          auto num = [&](const char *key, float lo, float hi, float current) -> float {
+                            if (!s[key].is<float>()) return current;
+                            float v = s[key].as<float>();
+                            return (v >= lo && v <= hi) ? v : current;
+                          };
+                          id(s_deadband) = num("deadband_c", 0.1f, 3, id(s_deadband));
+                          id(s_kp) = num("kp", 0, 10, id(s_kp));
+                          id(s_ki) = num("ki", 0, 1, id(s_ki));
+                          id(s_kd) = num("kd", 0, 100, id(s_kd));
+                          id(s_warm_max) = num("warm_fluid_max_c", 20, 45, id(s_warm_max));
+                          id(s_min_delta) = num("min_delta_c", 0, 10, id(s_min_delta));
+                          id(s_pump_min) = num("pump_min_pct", 0, 100, id(s_pump_min) * 100.0f) / 100.0f;
+                          id(s_tilt_timeout) = (int) num("tilt_timeout_s", 60, 3600, id(s_tilt_timeout));
+                          if (s["prefer_well_probe"].is<bool>()) id(s_prefer_well) = s["prefer_well_probe"].as<bool>();
+                          if (s["tilt_color"].is<const char *>()) {
+                            static const char *const COLORS[] = {"red", "green", "black", "purple", "orange", "blue", "yellow", "pink"};
+                            for (int i = 0; i < 8; i++)
+                              if (strcmp(s["tilt_color"].as<const char *>(), COLORS[i]) == 0) id(s_tilt_color) = (i + 1) * 0x10;
+                          }
+                          auto call = id(fermenter).make_call();
+                          bool changed = false;
+                          float now_t = id(fermenter).target_temperature;
+                          float want_t = num("target_c", 0, 30, now_t);
+                          if (!std::isnan(want_t) && (std::isnan(now_t) || fabsf(want_t - now_t) > 0.001f)) {
+                            call.set_target_temperature(want_t); changed = true;
+                          }
+                          if (s["mode"].is<const char *>()) {
+                            std::string m = s["mode"].as<const char *>();
+                            auto want_m = id(fermenter).mode;
+                            if (m == "off") want_m = climate::CLIMATE_MODE_OFF;
+                            else if (m == "cool") want_m = climate::CLIMATE_MODE_COOL;
+                            else if (m == "heat") want_m = climate::CLIMATE_MODE_HEAT;
+                            else if (m == "auto") want_m = climate::CLIMATE_MODE_HEAT_COOL;
+                            if (want_m != id(fermenter).mode) { call.set_mode(want_m); changed = true; }
+                          }
+                          if (changed) call.perform();
+                          return true;
+                        });
+                    - script.execute: apply_settings

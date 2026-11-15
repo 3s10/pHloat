@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{#
+  controllers.html: one section per fermenter controller: its status, newest readings, and a
+  form with a field for every setting. The fields are generated from the SPEC table in
+  controller_settings.py, so adding a setting there adds it here. A setting the controller
+  has not yet applied is marked "controller still has: ...".
+#}
+{% block title %}Controllers · pHloat{% endblock %}
+{% block main %}
+<h1>Controllers</h1>
+<p class="hint">The hub holds the master copy of every setting. A controller checks in about every 15 seconds, takes any changes, and keeps running on its last settings if the hub or Wi-Fi goes away. A change made anywhere else is put back at the next check-in.</p>
+{% for c in controllers %}
+<section class="chart">
+  <div class="head">
+    <div>
+      <h2>{{ device_label(c.device) }}</h2>
+      <p class="meta">{{ c.device.ident }} · last check-in {{ (c.seen | local("%d %b %H:%M:%S")) or "never" }}
+        {% if c.device.status %}· <b>{{ c.device.status }}</b>{% endif %}</p>
+    </div>
+    {% if c.pending %}<span class="badge">{{ c.pending }} change{{ "s" if c.pending != 1 }} waiting for the controller</span>{% endif %}
+  </div>
+  {% if c.latest %}
+  <dl class="stats wide">
+  {% for r in c.latest %}
+    <div><dt>{{ r.metric.replace("_", " ") }}</dt><dd>{{ "%.1f" | format(r.value) }}</dd><small>{{ r.ts | local }}</small></div>
+  {% endfor %}
+  </dl>
+  {% endif %}
+  <form class="settings" method="post" action="{{ url_for('ui.controller_save', device_id=c.device.id) }}">
+    {% for f in c.fields %}
+    {% if f.kind == "bool" %}
+    <label class="check"><input type="checkbox" name="{{ f.key }}" {{ "checked" if f.value }}> {{ f.label }}
+      {% if f.pending %}<small class="pending">controller still has: {{ "on" if f.reported else "off" }}</small>{% endif %}</label>
+    {% elif f.kind == "choice" %}
+    <label>{{ f.label }}
+      <select name="{{ f.key }}">{% for option in f.spec[2] %}<option {{ "selected" if option == f.value }}>{{ option }}</option>{% endfor %}</select>
+      {% if f.pending %}<small class="pending">controller still has: {{ f.reported }}</small>{% endif %}</label>
+    {% else %}
+    <label>{{ f.label }}{{ " (" ~ f.spec[4] ~ ")" if f.spec[4] }}
+      <input name="{{ f.key }}" inputmode="decimal" value="{{ f.value }}">
+      <small>{{ f.spec[2] }} to {{ f.spec[3] }}{% if f.pending %} · <span class="pending">controller still has: {{ f.reported }}</span>{% endif %}</small></label>
+    {% endif %}
+    {% endfor %}
+    <div class="actions"><button class="button">Save settings</button></div>
+  </form>
+</section>
+{% else %}
+<p class="empty">No controller has checked in yet. Flash <code>esphome/fermenter_controller.yaml</code> and it appears here on its own.</p>
+{% endfor %}
+{% endblock %}

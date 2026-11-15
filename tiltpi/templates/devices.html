@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{#
+  devices.html: every device the hub has heard from, with a box to give it a friendlier name
+  and a delete link.
+#}
+{% block title %}Devices · pHloat{% endblock %}
+{% block main %}
+<h1>Devices</h1>
+<p class="hint">Give a device a name to replace its default label everywhere. Clear the name to go back to the default.</p>
+<ul class="list">
+{% for d in devices %}
+  <li class="device">
+    <form class="rename" method="post" action="{{ url_for('ui.device_rename', device_id=d.id) }}">
+      <label>{{ d.kind }} · {{ d.ident }}{{ " · " ~ d.color if d.color }}
+        <input name="name" value="{{ d.name or '' }}" placeholder="{{ device_label(d) }}" maxlength="60"></label>
+      <button class="button quiet">Rename</button>
+    </form>
+    <span class="meta">Last reading {{ (last_seen.get(d.id) | local("%d %b %Y %H:%M")) or "never" }}</span>
+    <form class="inline" method="post" action="{{ url_for('ui.delete', table='devices', row_id=d.id) }}">
+      <input type="hidden" name="next" value="{{ url_for('ui.devices') }}">
+      <button class="link danger">Delete</button>
+    </form>
+  </li>
+{% else %}
+  <li class="empty">No devices have reported yet.</li>
+{% endfor %}
+</ul>
+<p class="hint">Deleting a device hides it and its readings. After {{ TRASH_DAYS }} days in the trash the device and its readings are removed for good. A device that is still switched on will reappear when it next reports.</p>
+{% endblock %}

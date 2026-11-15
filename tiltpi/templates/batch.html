@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{#
+  batch.html: one batch. Top to bottom: name and action buttons, the batch facts, the newest
+  values, one chart per measurement (drawn by svg_chart in ui.py), then the log with its
+  entry form. Each button sits in a small <form method="post"> because it changes something.
+  chart.js is loaded at the bottom to add hover values and zoom to the charts.
+#}
+{% block title %}{{ batch.name }} · pHloat{% endblock %}
+{% block main %}
+<div class="head">
+  <div>
+    <h1>{{ batch.name }}</h1>
+    <p class="meta">{{ batch.fermenter_tag or "No fermenter tag" }}
+      · started {{ batch.started_at | local("%d %b %Y %H:%M") }}
+      {% if batch.ended_at %}· finished {{ batch.ended_at | local("%d %b %Y %H:%M") }}{% endif %}</p>
+  </div>
+  <div class="actions">
+    <a class="button quiet" href="{{ url_for('ui.batch_edit', batch_id=batch.id) }}">Edit</a>
+    <form method="post" action="{{ url_for('ui.delete', table='batches', row_id=batch.id) }}">
+      <button class="button quiet danger">Delete</button>
+    </form>
+    {% if not batch.archived_at %}
+    <form method="post" action="{{ url_for('ui.batch_complete', batch_id=batch.id) }}">
+      <button class="button">{{ "Archive" if batch.ended_at else "Mark complete" }}</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+{% if batch.archived_at %}
+<p class="flash">Archived {{ batch.archived_at | local("%d %b %Y") }}. The readings were exported, uploaded and removed from this database; the record and log below are kept.</p>
+{% elif not batch.ended_at %}
+<p class="hint">Mark complete exports the run{{ ", uploads it to " ~ runs_remote ~ ", checks the upload, then removes its readings from this database" if runs_remote else " to this Pi. Nothing is uploaded or removed until runs_remote is set in config.json" }}.</p>
+{% endif %}
+
+<dl class="facts">
+  {% if batch.recipe_name %}<div><dt>Recipe</dt><dd>{{ batch.recipe_name }}</dd></div>{% endif %}
+  {% if batch.yeast %}<div><dt>Yeast</dt><dd>{{ batch.yeast }}</dd></div>{% endif %}
+  <div><dt>Devices</dt><dd>{% for d in devices %}{{ device_label(d) }}{{ ", " if not loop.last }}{% else %}none assigned{% endfor %}</dd></div>
+  <div><dt>Recipe file</dt><dd>{{ ("read as " ~ recipe.format if recipe else "attached, not readable") if batch.recipe_file else "none" }}</dd></div>
+</dl>
+{% if batch.notes %}<p class="notes">{{ batch.notes }}</p>{% endif %}
+
+{# The recipe summary read out of the attached file by recipe.py. <details> is a built-in
+   fold-out: closed by default so the charts stay near the top of the page. #}
+{% if recipe %}
+<details class="recipe">
+  <summary>Recipe: {{ recipe.name }}{{ " · " ~ recipe.style if recipe.style }}</summary>
+  <dl class="facts">
+    {% if recipe.og %}<div><dt>Original gravity (target)</dt><dd>{{ "%.3f" | format(recipe.og) }}</dd></div>{% endif %}
+    {% if recipe.fg %}<div><dt>Final gravity (target)</dt><dd>{{ "%.3f" | format(recipe.fg) }}</dd></div>{% endif %}
+    {% if recipe.batch_size_l %}<div><dt>Batch size</dt><dd>{{ recipe.batch_size_l }} L</dd></div>{% endif %}
+  </dl>
+  {% if recipe.fermentables %}<h3>Fermentables</h3><ul class="list">
+    {% for f in recipe.fermentables %}<li>{{ f.name }}{% if f.kg is defined %} <span class="meta">{{ f.kg }} kg</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+  {% if recipe.hops %}<h3>Hops</h3><ul class="list">
+    {% for h in recipe.hops %}<li>{{ h.name }} <span class="meta">{% if h.g is defined %}{{ h.g }} g{% endif %}{% if h.use is defined %} · {{ h.use }}{% endif %}{% if h.minutes is defined %} · {{ h.minutes }} min{% endif %}{% if h.alpha is defined %} · {{ h.alpha }}% alpha{% endif %}</span></li>{% endfor %}</ul>{% endif %}
+  {% if recipe.yeasts %}<h3>Yeast</h3><ul class="list">
+    {% for y in recipe.yeasts %}<li>{{ y.name }} <span class="meta">{{ y.lab if y.lab is defined }}{{ " " ~ y.product if y.product is defined }}</span></li>{% endfor %}</ul>{% endif %}
+  {% if recipe.mash %}<h3>Mash</h3><ul class="list">
+    {% for m in recipe.mash %}<li>{{ m.name }} <span class="meta">{% if m.temp_c is defined %}{{ m.temp_c }} °C{% endif %}{% if m.minutes is defined %} · {{ m.minutes }} min{% endif %}</span></li>{% endfor %}</ul>{% endif %}
+</details>
+{% endif %}
+
+{% if latest %}
+<dl class="stats wide">
+{% for r in latest if r.metric in ("sg", "ph", "temp_c", "battery_v") %}
+  <div><dt>{{ METRIC_LABELS[r.metric] }}<small>{{ device_label(r) }}</small></dt>
+  <dd>{{ fmt_value(r.metric, r.value) }}</dd><small>{{ r.ts | local }}</small></div>
+{% endfor %}
+</dl>
+{% endif %}
+
+{% for label, chart in charts %}
+<section class="chart"><h2>{{ label }}</h2>{{ chart }}</section>
+{% else %}
+{% if not batch.archived_at %}<p class="empty">No readings in this batch's time window yet. Check that its devices are assigned under Edit.</p>{% endif %}
+{% endfor %}
+
+<h2 id="log">Log</h2>
+<form class="logform" method="post" action="{{ url_for('ui.event_add', batch_id=batch.id) }}">
+  <label>Type <select name="kind">{% for k in kinds %}<option value="{{ k }}">{{ k.replace("_", " ") }}</option>{% endfor %}</select></label>
+  <label class="grow">Note <input name="note" placeholder="Stirred 60 s before pitching"></label>
+  <label>Value <input name="value" inputmode="decimal" size="6"></label>
+  <label>Unit <input name="unit" size="5" placeholder="psi"></label>
+  <label>When <input type="datetime-local" name="ts"></label>
+  <button class="button">Add</button>
+</form>
+<p class="hint">Leave When blank for now.</p>
+<ul class="log">
+{% for e in events %}
+  <li><time>{{ e.ts | local("%d %b %H:%M") }}</time>
+  <span class="kind">{{ e.kind.replace("_", " ") }}</span>
+  {% if e.value is not none %}<b>{{ e.value }}{{ " " ~ e.unit if e.unit }}</b>{% endif %}
+  {{ e.note or "" }}
+  <a class="link" href="{{ url_for('ui.event_edit', event_id=e.id) }}">Edit</a>
+  <form class="inline" method="post" action="{{ url_for('ui.delete', table='events', row_id=e.id) }}">
+    <input type="hidden" name="next" value="{{ url_for('ui.batch', batch_id=batch.id) }}#log">
+    <button class="link danger" aria-label="Delete this log entry">Delete</button>
+  </form></li>
+{% else %}
+  <li class="empty">Nothing logged yet.</li>
+{% endfor %}
+</ul>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='chart.js') }}" defer></script>{% endblock %}

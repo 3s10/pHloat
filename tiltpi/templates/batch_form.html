@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{#
+  batch_form.html: the form for creating a new batch or editing an existing one. `batch` is
+  empty for a new batch, which is why the fields use "... if batch else ''".
+  enctype="multipart/form-data" is what allows a file (the recipe) to be uploaded with the form.
+#}
+{% block title %}{{ "Edit " ~ batch.name if batch else "New batch" }} · pHloat{% endblock %}
+{% block main %}
+<h1>{{ "Edit " ~ batch.name if batch else "New batch" }}</h1>
+<form class="form" method="post" enctype="multipart/form-data">
+  <label>Name <input name="name" required value="{{ batch.name if batch else '' }}" placeholder="Pale Ale #12"></label>
+  <label>Fermenter asset tag <input name="fermenter_tag" value="{{ batch.fermenter_tag or '' if batch else '' }}" placeholder="FV-03"></label>
+  <label>Yeast <input name="yeast" value="{{ batch.yeast or '' if batch else '' }}" placeholder="US-05, generation 2, 180 g"></label>
+  <label>Recipe name <input name="recipe_name" value="{{ batch.recipe_name or '' if batch else '' }}"></label>
+  <label>Recipe file (BeerXML or Brewfather export). Its ingredients are read in, and it fills the recipe name and yeast if you leave those blank.{% if batch and batch.recipe_file %} One is attached; choose a file to replace it.{% endif %}
+    <input type="file" name="recipe_file"></label>
+  <label>Started <input type="datetime-local" name="started_at">
+    <small>{{ "Leave blank to keep " ~ (batch.started_at | local("%d %b %Y %H:%M")) if batch else "Leave blank for now." }}</small></label>
+  <fieldset>
+    <legend>Devices on this fermenter</legend>
+    {% for d in devices %}
+    <label class="check"><input type="checkbox" name="devices" value="{{ d.id }}" {{ "checked" if d.id in assigned }}>
+      {{ device_label(d) }} <small>{{ d.kind }} · {{ d.ident }}</small></label>
+    {% else %}
+    <p class="empty">No devices have reported yet. Save the batch and assign them once they show up.</p>
+    {% endfor %}
+  </fieldset>
+  <label>Notes <textarea name="notes" rows="4" placeholder="Grist, mash, water, anything not in the recipe file">{{ batch.notes or '' if batch else '' }}</textarea></label>
+  <div class="actions">
+    <button class="button">Save</button>
+    <a class="button quiet" href="{{ url_for('ui.batch', batch_id=batch.id) if batch else url_for('ui.overview') }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}

@@ -1,502 +1,161 @@
 #!/usr/bin/env python3
-"""
-pHloat Tilt Pi Integration Server
+"""pHloat hub web server.
 
-Receives pH data from pHloat sensors via HTTP POST
-Matches pH readings with Tilt data by timestamp
-Uploads combined data to Google Sheets
-Provides local web interface for monitoring
+WHAT THIS PROGRAM DOES
+    It runs on the Raspberry Pi and waits for two kinds of visitor on the local network:
+      1. Devices (the pHloat sensor, the fermenter controller) sending readings. They POST a
+         small JSON message to /api/ph or /api/readings.
+      2. People with a web browser. Those pages are defined in ui.py.
+
+RELATED FILES
+    tilt_listener.py        a separate program that logs the Tilt over Bluetooth
+    backup.py               snapshots, restore, run export
+    db.py                   the database
+    phloat_upload.py        checks that an upload is well formed
+    controller_settings.py  settings the hub sends back to a controller
+
+WORDS USED BELOW
+    Flask    A small Python library for writing web servers. `@app.post("/x")` means
+             "when a POST request arrives for /x, run the function underneath".
+    JSON     A plain-text way of writing data, e.g. {"device": "phloat-1", "pH": 4.31}.
+    HTTP status codes   The number every web reply carries: 200 = fine, 400 = your request
+             was wrong, 401 = wrong password, 429 = slow down, 503 = not ready.
 """
 
-from flask import Flask, request, jsonify, render_template_string
-import json
-import sqlite3
 import os
-from datetime import datetime, timedelta
 import threading
 import time
-import requests
 
-# Try to import Google Sheets libraries (optional)
-try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-    GSHEETS_AVAILABLE = True
-except ImportError:
-    GSHEETS_AVAILABLE = False
-    print("Warning: Google Sheets libraries not available")
+from flask import Flask, jsonify, request
 
+import controller_settings
+from db import add_readings, connect, device_id, latest_readings, load_config, utc_now
+from phloat_upload import UPLOAD_AUTH_HEADER, parse_upload, public_config_snapshot, verify_upload_token
+from ui import ui
+
+# ---------------------------------------------------------------------------------------------
+# Create the web application and attach the browser pages from ui.py.
+# ---------------------------------------------------------------------------------------------
 app = Flask(__name__)
+# The secret key signs the one-shot status messages ("Saved.") shown after a form is submitted.
+# A fresh random key at every start is fine: it only means such a message is lost on restart.
+app.secret_key = os.urandom(24)
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024    # refuse uploads over 4 MB (recipe files are small)
+app.register_blueprint(ui)                            # adds every page defined in ui.py
+config = load_config()                                # read config.json once, at start-up
 
-# Configuration
-DB_PATH = os.path.join(os.path.dirname(__file__), 'phloat.db')
-TILT_DB_PATH = '/home/pi/tilt_data.db'  # Adjust if Tilt Pi uses different path
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
-from phloat_upload import (
-    UPLOAD_AUTH_HEADER,
-    TIME_MATCH_WINDOW,
-    get_upload_secret,
-    public_config_snapshot,
-    validate_reading_payload,
-    verify_upload_token,
-)
-from tilt_matching import find_matching_tilt_reading
-
-# Initialize database
-def init_db():
-    """Create database tables if they don't exist"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    # pH data table
-    c.execute('''CREATE TABLE IF NOT EXISTS ph_data
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  device_name TEXT NOT NULL,
-                  pH REAL NOT NULL,
-                  temperature REAL,
-                  timestamp DATETIME NOT NULL,
-                  reading_number INTEGER,
-                  matched_tilt_color TEXT,
-                  matched_tilt_sg REAL,
-                  matched_tilt_temp REAL,
-                  uploaded_to_sheets BOOLEAN DEFAULT 0)''')
-    
-    # Configuration table
-    c.execute('''CREATE TABLE IF NOT EXISTS config
-                 (key TEXT PRIMARY KEY,
-                  value TEXT)''')
-    
-    conn.commit()
-    conn.close()
-    print(f"Database initialized: {DB_PATH}")
-
-# Load configuration
-def load_config():
-    """Load configuration from file"""
-    default_config = {
-        'google_sheets_enabled': False,
-        'google_sheet_id': '',
-        'credentials_file': 'credentials.json',
-        'tilt_db_path': TILT_DB_PATH,
-        'auto_match_tilt': True,
-        'port': 5000,
-        'upload_secret': os.environ.get('PHLOAT_UPLOAD_SECRET', ''),
-    }
-    
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, 'r') as f:
-            config = json.load(f)
-            default_config.update(config)
-    
-    return default_config
-
-def save_config(config):
-    """Save configuration to file"""
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(config, f, indent=2)
-
-# Global config
-config = load_config()
-
-# ── Rate limiter for API endpoints ──────────────────────────
-# Token bucket: 30 requests/minute per IP, burst of 10
+# ---------------------------------------------------------------------------------------------
+# Rate limiting: stop a faulty device from flooding the database.
+#
+# Method: a "token bucket", one per sender address. Each sender has a bucket holding up to 30
+# tokens. Every upload costs one token. Tokens refill at half a token per second (30 a minute).
+# A sender with an empty bucket is refused until it refills. Normal devices upload a few times
+# a minute and never notice.
+#
+# The lock makes sure two uploads handled at the same moment don't both read and write the
+# same bucket and corrupt its count.
+# ---------------------------------------------------------------------------------------------
 _rate_buckets = {}
 _rate_lock = threading.Lock()
 
+
 def check_rate_limit(client_ip):
+    """Return True if this sender may upload now, False if it is going too fast."""
     now = time.time()
     with _rate_lock:
         bucket = _rate_buckets.get(client_ip, {"tokens": 30, "last": now})
-        elapsed = now - bucket["last"]
-        bucket["tokens"] = min(30, bucket["tokens"] + elapsed * (30.0 / 60.0))
+        # Add the tokens earned since this sender's last upload, up to the maximum of 30.
+        bucket["tokens"] = min(30, bucket["tokens"] + (now - bucket["last"]) * 0.5)
         bucket["last"] = now
+        _rate_buckets[client_ip] = bucket
         if bucket["tokens"] < 1.0:
-            _rate_buckets[client_ip] = bucket
             return False
         bucket["tokens"] -= 1.0
-        _rate_buckets[client_ip] = bucket
     return True
 
-def upload_to_google_sheets(data_id):
-    """Upload pH data to Google Sheets"""
-    if not config.get('google_sheets_enabled') or not GSHEETS_AVAILABLE:
-        return False
-    
+
+def _error(message, status):
+    """Build an error reply in the same JSON shape every device expects."""
+    return jsonify({"status": "error", "message": message}), status
+
+
+# ---------------------------------------------------------------------------------------------
+# The upload address. Two paths, one function:
+#   /api/ph        what the pHloat sensor posts to
+#   /api/readings  the same thing under a clearer name, used by the controller
+# ---------------------------------------------------------------------------------------------
+@app.post("/api/ph")
+@app.post("/api/readings")
+def receive_readings():
+    # Step 1: is the sender allowed? Every device sends the shared secret in a request header.
+    ok, auth_error = verify_upload_token(request.headers.get(UPLOAD_AUTH_HEADER, ""), config)
+    if not ok:
+        # 401 = wrong secret. 503 = the hub itself has no secret set yet, so nothing can be accepted.
+        return _error(auth_error, 401 if auth_error == "Unauthorized" else 503)
+
+    # Step 2: is the sender going too fast?
+    if not check_rate_limit(request.remote_addr or "127.0.0.1"):
+        return _error("Rate limit exceeded", 429)
+
+    # Step 3: is the message well formed? parse_upload raises an error describing what is wrong.
     try:
-        # Get credentials
-        creds_file = config.get('credentials_file', 'credentials.json')
-        if not os.path.exists(creds_file):
-            print(f"Credentials file not found: {creds_file}")
-            return False
-        
-        # Authenticate with Google Sheets
-        scope = ['https://spreadsheets.google.com/feeds',
-                 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(creds_file, scope)
-        client = gspread.authorize(creds)
-        
-        # Open spreadsheet
-        sheet_id = config.get('google_sheet_id')
-        if not sheet_id:
-            print("No Google Sheet ID configured")
-            return False
-        
-        spreadsheet = client.open_by_key(sheet_id)
-        
-        # Get data from database
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""SELECT device_name, pH, temperature, timestamp, 
-                            matched_tilt_color, matched_tilt_sg, matched_tilt_temp, reading_number
-                     FROM ph_data WHERE id = ?""", (data_id,))
-        row = c.fetchone()
-        conn.close()
-        
-        if not row:
-            return False
-        
-        device_name, pH, temp, timestamp, tilt_color, tilt_sg, tilt_temp, reading_num = row
-        
-        # Get or create worksheet for this device
-        try:
-            worksheet = spreadsheet.worksheet(device_name)
-        except:
-            worksheet = spreadsheet.add_worksheet(title=device_name, rows=1000, cols=10)
-            # Add headers
-            worksheet.update('A1:H1', [[
-                'Timestamp', 'pH', 'pH Temp (°C)', 'Tilt Color', 
-                'Specific Gravity', 'Tilt Temp (°F)', 'Reading #', 'Match Status'
-            ]])
-        
-        # Prepare data row
-        match_status = 'Matched' if tilt_color else 'No Tilt Data'
-        new_row = [
-            timestamp,
-            pH,
-            temp if temp else '',
-            tilt_color if tilt_color else '',
-            tilt_sg if tilt_sg else '',
-            tilt_temp if tilt_temp else '',
-            reading_num if reading_num else '',
-            match_status
-        ]
-        
-        # Append row
-        worksheet.append_row(new_row)
-        
-        # Mark as uploaded
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE ph_data SET uploaded_to_sheets = 1 WHERE id = ?", (data_id,))
-        conn.commit()
-        conn.close()
-        
-        print(f"Uploaded to Google Sheets: {device_name} - pH {pH}")
-        return True
-        
-    except Exception as e:
-        print(f"Error uploading to Google Sheets: {e}")
-        return False
+        upload = parse_upload(request.get_json(silent=True))
+    except (ValueError, TypeError) as exc:
+        return _error(str(exc), 400)
 
-@app.route('/')
-def index():
-    """Main dashboard page"""
-    html = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>pHloat Tilt Pi Dashboard</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .header {
-            background: white;
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            margin-bottom: 30px;
-            text-align: center;
-        }
-        h1 { color: #333; font-size: 2.5em; margin-bottom: 10px; }
-        .subtitle { color: #666; font-size: 1.1em; }
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-        .card h2 { color: #667eea; margin-bottom: 15px; }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-        }
-        th, td {
-            padding: 10px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }
-        th { background: #f5f5f5; font-weight: bold; }
-        .status-badge {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 0.9em;
-            font-weight: bold;
-            margin-top: 10px;
-        }
-        .status-online { background: #4CAF50; color: white; }
-        .status-offline { background: #f44336; color: white; }
-        .btn {
-            display: inline-block;
-            padding: 10px 20px;
-            background: #667eea;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            margin-top: 10px;
-        }
-        .btn:hover { background: #764ba2; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🧪 pHloat Tilt Pi Dashboard</h1>
-            <p class="subtitle">pH Monitoring with Tilt Integration</p>
-        </div>
-        
-        <div class="cards">
-            <div class="card">
-                <h2>System Status</h2>
-                <p><strong>Server:</strong> <span class="status-badge status-online">Running</span></p>
-                <p><strong>Port:</strong> ''' + str(config.get('port', 5000)) + '''</p>
-                <p><strong>Database:</strong> ''' + ('Connected' if os.path.exists(DB_PATH) else 'Not Found') + '''</p>
-                <p><strong>Tilt Database:</strong> ''' + ('Found' if os.path.exists(config.get('tilt_db_path', TILT_DB_PATH)) else 'Not Found') + '''</p>
-                <p><strong>Google Sheets:</strong> ''' + ('Enabled' if config.get('google_sheets_enabled') else 'Disabled') + '''</p>
-            </div>
-            
-            <div class="card">
-                <h2>Quick Links</h2>
-                <a href="/data" class="btn">View All Data</a><br>
-                <a href="/config" class="btn">Configuration</a><br>
-                <a href="/api/status" class="btn">API Status</a>
-            </div>
-            
-            <div class="card">
-                <h2>Recent Readings</h2>
-                <div id="recentData">Loading...</div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        function loadRecentData() {
-            fetch('/api/recent')
-                .then(response => response.json())
-                .then(data => {
-                    const container = document.getElementById('recentData');
-                    if (data.readings.length === 0) {
-                        container.innerHTML = '<p>No readings yet</p>';
-                        return;
-                    }
-                    
-                    let html = '<table><tr><th>Device</th><th>pH</th><th>Time</th></tr>';
-                    data.readings.forEach(reading => {
-                        html += `<tr>
-                            <td>${reading.device_name}</td>
-                            <td>${reading.pH.toFixed(2)}</td>
-                            <td>${new Date(reading.timestamp).toLocaleString()}</td>
-                        </tr>`;
-                    });
-                    html += '</table>';
-                    container.innerHTML = html;
-                });
-        }
-        
-        loadRecentData();
-        setInterval(loadRecentData, 10000);  // Refresh every 10 seconds
-    </script>
-</body>
-</html>
-    '''
-    return render_template_string(html)
-
-@app.route('/api/ph', methods=['POST'])
-def receive_ph_data():
-    """
-    Receive pH data from pHloat sensors
-    
-    Expected JSON format:
-    {
-        "device": "Fermenter-1",
-        "pH": 4.52,
-        "temperature": 18.5,
-        "timestamp": "2024-02-08T14:30:00",
-        "readingNumber": 123
-    }
-    """
+    # Step 4: store it. `try ... finally` guarantees the database is closed even if a step fails.
+    conn = connect()
     try:
-        ok, auth_error = verify_upload_token(
-            request.headers.get(UPLOAD_AUTH_HEADER, ''), config)
-        if not ok:
-            status = 401 if auth_error == 'Unauthorized' else 503
-            return jsonify({'status': 'error', 'message': auth_error}), status
-
-        # Rate limit: 30 req/min per IP
-        client_ip = request.remote_addr or '127.0.0.1'
-        if not check_rate_limit(client_ip):
-            return jsonify({'status': 'error', 'message': 'Rate limit exceeded'}), 429
-
-        data = request.get_json()
-        device_name, pH, temperature, timestamp, reading_number = validate_reading_payload(data)
-        
-        # Find matching Tilt data
-        tilt_match = None
-        if config.get('auto_match_tilt', True):
-            tilt_match = find_matching_tilt_reading(timestamp, config, TILT_DB_PATH)
-        
-        # Store in database
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""INSERT INTO ph_data 
-                     (device_name, pH, temperature, timestamp, reading_number,
-                      matched_tilt_color, matched_tilt_sg, matched_tilt_temp)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (device_name, pH, temperature, timestamp, reading_number,
-                   tilt_match['color'] if tilt_match else None,
-                   tilt_match['sg'] if tilt_match else None,
-                   tilt_match['temp'] if tilt_match else None))
-        
-        data_id = c.lastrowid
-        conn.commit()
+        dev = device_id(conn, upload["kind"], upload["device"], upload["color"])
+        if upload["metrics"]:
+            add_readings(conn, dev, upload["metrics"], upload["ts"])
+        if upload["status"]:
+            conn.execute("UPDATE devices SET status = ? WHERE id = ?", (upload["status"], dev))
+            conn.commit()
+        # Step 5: a controller also reports the settings it is running. Record them and look up
+        # what the hub wants them to be. That answer rides back in this reply, which is how the
+        # hub changes a controller without ever having to connect to it.
+        desired = controller_settings.sync(conn, dev, upload["settings"], utc_now()) if upload["settings"] else {}
+    finally:
         conn.close()
-        
-        print(f"Received pH data: {device_name} - pH {pH:.2f} at {timestamp}")
-        if tilt_match:
-            print(f"  Matched with Tilt {tilt_match['color']}: SG {tilt_match['sg']}")
-        
-        # Upload to Google Sheets in background
-        if config.get('google_sheets_enabled'):
-            threading.Thread(target=upload_to_google_sheets, args=(data_id,)).start()
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Data received',
-            'tilt_matched': tilt_match is not None,
-            'tilt_color': tilt_match['color'] if tilt_match else None
-        }), 200
-        
-    except Exception as e:
-        print(f"Error receiving pH data: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+    if upload["metrics"]:
+        print(f"Stored {upload['device']}: {upload['metrics']}")
+    return jsonify({"status": "success", "message": "Data received", "stored": len(upload["metrics"]),
+                    "settings": desired})
 
-@app.route('/api/status')
+
+# ---------------------------------------------------------------------------------------------
+# Two read-only addresses, handy for checking the hub from a browser or a script.
+# ---------------------------------------------------------------------------------------------
+@app.get("/api/status")
 def api_status():
-    """API status endpoint"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM ph_data")
-    total_readings = c.fetchone()[0]
-    c.execute("SELECT COUNT(DISTINCT device_name) FROM ph_data")
-    total_devices = c.fetchone()[0]
-    conn.close()
-    
-    return jsonify({
-        'status': 'online',
-        'total_readings': total_readings,
-        'total_devices': total_devices,
-        'tilt_db_found': os.path.exists(config.get('tilt_db_path', TILT_DB_PATH)),
-        'google_sheets_enabled': config.get('google_sheets_enabled', False),
-        'config': public_config_snapshot(config, TILT_DB_PATH)
-    })
+    """Is the hub alive, and how much has it stored? Never reveals the upload secret."""
+    conn = connect()
+    try:
+        total, newest = conn.execute("SELECT COUNT(*), MAX(ts) FROM readings").fetchone()
+        devices = conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+    finally:
+        conn.close()
+    return jsonify({"status": "online", "total_readings": total, "newest_reading": newest,
+                    "total_devices": devices, "config": public_config_snapshot(config)})
 
-@app.route('/api/recent')
+
+@app.get("/api/recent")
 def api_recent():
-    """Get recent pH readings"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("""SELECT device_name, pH, temperature, timestamp, 
-                        matched_tilt_color, matched_tilt_sg
-                 FROM ph_data 
-                 ORDER BY timestamp DESC 
-                 LIMIT 10""")
-    rows = c.fetchall()
-    conn.close()
-    
-    readings = [dict(row) for row in rows]
-    return jsonify({'readings': readings})
+    """The newest value of every measurement on every device."""
+    conn = connect()
+    try:
+        return jsonify({"readings": latest_readings(conn)})
+    finally:
+        conn.close()
 
-@app.route('/data')
-def view_data():
-    """View all data page"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("""SELECT * FROM ph_data ORDER BY timestamp DESC LIMIT 100""")
-    rows = c.fetchall()
-    conn.close()
-    
-    # Simple HTML table view
-    html = '<html><head><title>pHloat Data</title></head><body>'
-    html += '<h1>pHloat pH Data</h1><a href="/">Back to Dashboard</a><br><br>'
-    html += '<table border="1"><tr>'
-    html += '<th>Device</th><th>pH</th><th>Temp</th><th>Timestamp</th>'
-    html += '<th>Tilt Color</th><th>SG</th></tr>'
-    
-    for row in rows:
-        html += f'<tr><td>{row["device_name"]}</td>'
-        html += f'<td>{row["pH"]:.2f}</td>'
-        html += f'<td>{row["temperature"] if row["temperature"] else "N/A"}</td>'
-        html += f'<td>{row["timestamp"]}</td>'
-        html += f'<td>{row["matched_tilt_color"] if row["matched_tilt_color"] else "N/A"}</td>'
-        html += f'<td>{row["matched_tilt_sg"] if row["matched_tilt_sg"] else "N/A"}</td></tr>'
-    
-    html += '</table></body></html>'
-    return html
 
-@app.route('/config')
-def view_config():
-    """Configuration page (secrets redacted)"""
-    return jsonify(public_config_snapshot(config, TILT_DB_PATH))
-
-if __name__ == '__main__':
-    print("Initializing pHloat server...")
-    init_db()
-    
-    port = config.get('port', 5000)
-    print(f"\n{'='*60}")
-    print(f"pHloat Server Starting on Port {port}")
-    print(f"{'='*60}")
-    print(f"\nDashboard: http://localhost:{port}")
-    print(f"API Endpoint: http://localhost:{port}/api/ph")
-    print(f"\nConfigure your pHloat Relay to send data to:")
-    print(f"  http://<raspberry-pi-ip>:{port}/api/ph")
-    print(f"\n{'='*60}\n")
-    
-    # Flask's built-in server is fine for home/personal use on a local
-    # network. For internet-facing deployments, replace with:
-    #   pip install waitress
-    #   from waitress import serve
-    #   serve(app, host='0.0.0.0', port=port)
-    app.run(host='0.0.0.0', port=port, debug=False)
+# ---------------------------------------------------------------------------------------------
+# Start the server when this file is run directly (the systemd service does exactly that).
+# ---------------------------------------------------------------------------------------------
+if __name__ == "__main__":
+    connect().close()   # opening the database once creates the file and tables on first run
+    # host="0.0.0.0" means "answer on the Pi's network address", so other devices on the LAN can
+    # reach it. Flask's built-in server is fine for a home network. Never forward this port
+    # from your router to the internet: the hub has no logins.
+    app.run(host="0.0.0.0", port=config.get("port", 5000), debug=False)

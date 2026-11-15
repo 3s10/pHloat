@@ -1,7 +1,14 @@
+"""Tests for cleaning device names (tiltpi/phloat_helpers.py).
+
+A device sends its own name, and that name is used in file names and on pages, so anything
+other than letters, digits, "-" and "_" must be stripped. Run with:
+    python -m unittest discover tests
+"""
 import sys
 import unittest
 from pathlib import Path
 
+# Let Python find the hub's modules, which live in the tiltpi folder next to this one.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tiltpi"))
 
 from phloat_helpers import sanitize_device_name

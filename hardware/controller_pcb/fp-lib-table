@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "phloat")(type "KiCad")(uri "${KIPRJMOD}/../phloat_sensor_pcb/phloat.pretty")(options "")(descr "pHloat project footprints"))
+)
