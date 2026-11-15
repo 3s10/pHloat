@@ -40,6 +40,8 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 | D7 | 2026-11-14 | All wetted materials must be **food safe**, with **O-rings on every penetration**. | Product requirement. |
 | D8 | 2026-11-15 | Heating uses a **warm-water reactor rod** (MoreBeer conical reactor rod), not an electric element in oil. | Removes mains voltage, oil and pressure from the fermenter. |
 | D9 | 2026-11-15 | Warm water is heated by a **separate UL-listed aquarium heater**. Nothing we design touches mains. | Keeps electrical risk off our boards. |
+| D32 | 2026-11-15 | The 12 V supply is a bought 10 A enclosed unit in **its own 3D-printed box with an IEC C14 mains inlet**, separate from the controller. This narrows D9: there is still no mains on any circuit we design or inside the controller box, but the supply box does contain mains wiring. Your call. |
+| D33 | 2026-11-15 | The power supply box is **fan-cooled**: two 25 mm 12 V fans, intake low on one side wall and exhaust high on the opposite one. It is therefore vented, not sealed. Your call; `fans = false` gives the sealed version. |
 | D10 | 2026-11-15 | One controller board drives **both pumps with variable speed** and reads the fluid temperatures. | Jacket and rod use the same hardware. |
 | D11 | 2026-11-15 | Controller board is **12 V only, about 2 A per pump**. | Limits of the chosen transistors and traces. |
 
@@ -98,6 +100,7 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 - [x] Controller enclosure modelled and exported for printing
 - [x] Controller schematic generated; its netlist matches the board
 - [x] Mounting ears added to both enclosures
+- [x] Power supply enclosure modelled (mains inlet, fuse, switch, 12 V gland, intake and exhaust fans) and exported for printing
 - [x] Hub settings sync written into the firmware (check-in every 15 s)
 - [x] Firmware with settings sync validates and compiles
 - [ ] **Not proven on hardware:** no board made, no pump has turned, gains untuned
@@ -130,6 +133,7 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 - [ ] Order sensor PCBs (first check the pH module footprint 1:1 on paper)
 - [ ] Order controller PCBs (first check diode polarity and terminal directions)
 - [ ] Print both enclosures (first measure battery height, gland nuts, cable diameters)
+- [ ] Power supply box: measure the inlet module, the fans and the supply; print in flame-retardant filament on a printer with a 300 mm bed (the body is 282 mm long); wire it; check earth continuity; check both fans blow the right way; check its temperature after an hour with both pumps running
 - [ ] Install the hub on the Pi; stop TiltPi
 - [ ] Prove the Tilt listener hears a real Tilt, including through a stainless fermenter
 - [ ] Set up Google Drive with `rclone`; prove backup, restore and run upload for real
@@ -161,7 +165,7 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 - [x] Component READMEs and the upload contract updated to the current design
 - [x] `SYSTEM_GUIDE.md` written as the current starting point
 - [x] Legacy documents and legacy code left untouched (D30). `SYSTEM_GUIDE.md` is the current starting point and says which files are legacy
-- [x] Work committed to git and pushed to GitHub on branch `esphome-hub-controller` (2026-11-15)
+- [x] Work committed to git, pushed to GitHub and merged into `master` (2026-11-15)
 
 ### Later / product
 
@@ -185,6 +189,12 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 | Sensor readings may be off while USB is plugged into a grounded computer (no isolation) | Compare readings on battery vs USB |
 | Sensor sleep current is unmeasured, so battery life is unknown | Measure it |
 | Many small brushless pumps misbehave on a chopped supply | Buy a brushed pump, or test the chosen one |
+| The power supply box is a home-built, uncertified mains enclosure in a wet area | GFCI outlet, inlet facing down, flame-retardant filament, earth check; or use a sealed pre-wired supply instead |
+| The power supply box's inlet cutout uses typical dimensions, not a datasheet | Measure the inlet module before printing |
+| The power supply box's temperature rise is an estimate, and the fans' real airflow is unknown | Measure after an hour at full pump load |
+| The fans pull damp brewery air across mains electronics | Mount it in a dry space, or print the sealed version and stay under 5 A |
+| The power supply box body is 282 mm long, too long for a 250 mm class printer | Use a 300 mm class printer |
+| The fan hole pattern uses typical 25 mm fan dimensions, not a datasheet | Measure the fans before printing |
 | Controller gland nut clearance is only 0.6 mm with the assumed nut size | Measure the glands before printing |
 | The pH module footprint pitch (2.25 mm vs the datasheet's 2.3 mm) | Print 1:1 and lay the module on it |
 | No hardware under-voltage cut-off on the sensor; firmware stops at 3.2 V | Test with a nearly flat cell |
@@ -196,4 +206,4 @@ Each decision is locked unless you change it. "Why" is the reason given at the t
 | Date | What changed |
 |---|---|
 | 2026-11-14 | Reviewed the original design. Chose the hardware. Designed the sensor PCB and enclosure. Wrote the sensor firmware. |
-| 2026-11-15 | Built the hub (database, Tilt listener, pages, backups, archive, trash, charts). Wrote the controller firmware. Designed the controller PCB and enclosure. Dropped ESP-NOW. Added hub-to-controller settings sync. Started this tracker. Commented all current code. Wrote SYSTEM_GUIDE.md. Added recipe reading, log editing, the Home Assistant feed, the controller schematic and mounting ears. Committed and pushed. |
+| 2026-11-15 | Built the hub (database, Tilt listener, pages, backups, archive, trash, charts). Wrote the controller firmware. Designed the controller PCB and enclosure. Dropped ESP-NOW. Added hub-to-controller settings sync. Started this tracker. Commented all current code. Wrote SYSTEM_GUIDE.md. Added recipe reading, log editing, the Home Assistant feed, the controller schematic and mounting ears. Committed and pushed. Added the fan-cooled power supply enclosure. Merged into `master`. |

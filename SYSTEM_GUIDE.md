@@ -42,7 +42,7 @@ It records a fermentation in enough detail to repeat it: gravity, temperature an
 2. **The hub is the master.** Settings are changed on the hub. Home Assistant is for dashboards and alerts.
 3. **The controller works alone.** Its control loop runs on its own board, and it remembers its last settings.
 4. **Fail-safe means both pumps off.** No beer temperature, a missing probe, fluid at the wrong temperature, a crash or a reset all end there.
-5. **No mains voltage on anything we build.** Warm water comes from a separate UL-listed aquarium heater.
+5. **No mains voltage on any circuit we design, or inside the controller box.** Warm water comes from a separate UL-listed aquarium heater, and 12 V comes from a bought supply. That supply lives in its own printed box, which does contain mains wiring and has its own safety rules.
 6. **Nothing is deleted until its copy is proven.** A finished run is exported, uploaded and verified before its readings are pruned.
 
 ## Where everything is
@@ -55,6 +55,7 @@ It records a fermentation in enough detail to repeat it: gravity, temperature an
 | `hardware/enclosure/` | Sensor enclosure (OpenSCAD source, STL files) |
 | `hardware/controller_pcb/` | Controller circuit board |
 | `hardware/controller_enclosure/` | Controller enclosure |
+| `hardware/psu_enclosure/` | Box for the 12 V power supply, with the mains inlet. **Contains mains: read its README first** |
 | `integration/upload_contract.json` | The message format devices use to talk to the hub |
 | `tests/` | Automated tests for the hub |
 | `install-phloat-tiltpi.sh` | Installs the hub on a Raspberry Pi |
